@@ -2,9 +2,30 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 )
+
+func TestAuthenticationGate(t *testing.T) {
+	h := (&Server{}).routes()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/login" {
+		t.Fatalf("root: status=%d location=%q", w.Code, w.Header().Get("Location"))
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/products", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("API status=%d, want 401", w.Code)
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("login status=%d, want 200", w.Code)
+	}
+}
 
 func TestPostgresMigration(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")

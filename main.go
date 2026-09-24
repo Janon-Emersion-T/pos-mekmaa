@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"golang.org/x/crypto/bcrypt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -74,7 +78,24 @@ func openDB(ctx context.Context, url string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("run migration: %w", err)
 	}
+	if err = ensureSuperadmin(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create superadmin: %w", err)
+	}
 	return db, nil
+}
+func ensureSuperadmin(ctx context.Context, db *sql.DB) error {
+	const email = "janon@lkprofessionals.com"
+	const passwordHash = "$2a$10$kBHVZlCmocrXwUFAy7B3leIkgjZkXJNmFSStd.vbtxZHPGE0FcZVG"
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE email=$1)`, email).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err := db.ExecContext(ctx, `INSERT INTO users(email,password_hash,role) VALUES($1,$2,'superadmin')`, email, passwordHash)
+	return err
 }
 func respond(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -455,22 +476,96 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, 201, map[string]bool{"ok": true})
 }
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	var id int64
+	var hash string
+	var active bool
+	err := s.db.QueryRowContext(r.Context(), `SELECT id,password_hash,active FROM users WHERE lower(email)=lower($1)`, strings.TrimSpace(req.Email)).Scan(&id, &hash, &active)
+	if err != nil || !active || bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
+		problem(w, http.StatusUnauthorized, "Invalid email or password")
+		return
+	}
+	raw := make([]byte, 32)
+	if _, err = rand.Read(raw); err != nil {
+		problem(w, 500, "Could not create session")
+		return
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	if _, err = s.db.ExecContext(r.Context(), `INSERT INTO auth_sessions(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '12 hours')`, id, tokenHash(token)); err != nil {
+		problem(w, 500, "Could not create session")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "counter_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: 12 * 60 * 60})
+	respond(w, 200, map[string]bool{"ok": true})
+}
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie("counter_session"); err == nil {
+		_, _ = s.db.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE token_hash=$1`, tokenHash(c.Value))
+	}
+	http.SetCookie(w, &http.Cookie{Name: "counter_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
+	respond(w, 200, map[string]bool{"ok": true})
+}
+func (s *Server) authenticated(r *http.Request) bool {
+	c, err := r.Cookie("counter_session")
+	if err != nil || len(c.Value) < 32 {
+		return false
+	}
+	var ok bool
+	err = s.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_sessions a JOIN users u ON u.id=a.user_id WHERE a.token_hash=$1 AND a.expires_at>now() AND u.active)`, tokenHash(c.Value)).Scan(&ok)
+	return err == nil && ok
+}
+func (s *Server) requireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.authenticated(r) {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				problem(w, http.StatusUnauthorized, "Authentication required")
+			} else {
+				http.Redirect(w, r, "/login", http.StatusSeeOther)
+			}
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 func (s *Server) routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/products", s.products)
-	mux.HandleFunc("GET /api/sales", s.sales)
-	mux.HandleFunc("POST /api/checkout", s.checkout)
-	mux.HandleFunc("GET /api/session", s.sessions)
-	mux.HandleFunc("POST /api/session/open", s.sessions)
-	mux.HandleFunc("POST /api/session/close", s.sessions)
-	mux.HandleFunc("GET /api/petty-cash", s.pettyCash)
-	mux.HandleFunc("POST /api/petty-cash", s.pettyCash)
-	mux.HandleFunc("GET /api/purchases", s.purchases)
-	mux.HandleFunc("POST /api/purchases", s.purchases)
-	mux.HandleFunc("GET /api/inventory/movements", s.inventory)
-	mux.HandleFunc("POST /api/inventory/adjustments", s.inventory)
+	private := http.NewServeMux()
+	private.HandleFunc("GET /api/products", s.products)
+	private.HandleFunc("GET /api/sales", s.sales)
+	private.HandleFunc("POST /api/checkout", s.checkout)
+	private.HandleFunc("GET /api/session", s.sessions)
+	private.HandleFunc("POST /api/session/open", s.sessions)
+	private.HandleFunc("POST /api/session/close", s.sessions)
+	private.HandleFunc("GET /api/petty-cash", s.pettyCash)
+	private.HandleFunc("POST /api/petty-cash", s.pettyCash)
+	private.HandleFunc("GET /api/purchases", s.purchases)
+	private.HandleFunc("POST /api/purchases", s.purchases)
+	private.HandleFunc("GET /api/inventory/movements", s.inventory)
+	private.HandleFunc("POST /api/inventory/adjustments", s.inventory)
 	sub, _ := fs.Sub(assets, "web")
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	private.Handle("/", http.FileServer(http.FS(sub)))
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/auth/login", s.login)
+	mux.HandleFunc("POST /api/auth/logout", s.logout)
+	mux.HandleFunc("GET /styles.css", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, sub, "styles.css") })
+	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
+		if s.authenticated(r) {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		http.ServeFileFS(w, r, sub, "login.html")
+	})
+	mux.Handle("/", s.requireAuth(private))
 	return mux
 }
 func main() {

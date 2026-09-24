@@ -19,6 +19,8 @@ DATABASE_URL='postgres://counter:counter@localhost:5432/counter?sslmode=disable'
 
 Open http://localhost:8886. The PostgreSQL schema and starter products are created on first launch. The default connection is `postgres://counter:counter@localhost:5432/counter?sslmode=disable`; override it with `DATABASE_URL`. Set `ADDR` to change the listening address, for example `ADDR=:9000`.
 
+The initial superadmin is seeded automatically on first launch. There is no public registration route; additional staff accounts should be created through an administrator workflow.
+
 ## Develop styles
 
 ```sh
