@@ -1,0 +1,16 @@
+{
+  "name": "pos",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "css": "tailwindcss -i ./web/input.css -o ./web/styles.css --minify",
+    "css:watch": "tailwindcss -i ./web/input.css -o ./web/styles.css --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  },
+  "private": true
+}
