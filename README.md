@@ -4,12 +4,20 @@ A café point-of-sale application built with Go, PostgreSQL, and compiled Tailwi
 
 ## Run
 
-```sh
-docker compose up -d postgres
-go run .
+Create a PostgreSQL database and user using your PostgreSQL administration method:
+
+```sql
+CREATE USER counter WITH PASSWORD 'counter';
+CREATE DATABASE counter OWNER counter;
 ```
 
-Open http://localhost:8080. The PostgreSQL schema and starter products are created on first launch. The default connection is `postgres://counter:counter@localhost:5433/counter?sslmode=disable`; override it with `DATABASE_URL`. Set `ADDR` to change the listening address.
+Then start the application:
+
+```sh
+DATABASE_URL='postgres://counter:counter@localhost:5432/counter?sslmode=disable' go run .
+```
+
+Open http://localhost:8886. The PostgreSQL schema and starter products are created on first launch. The default connection is `postgres://counter:counter@localhost:5432/counter?sslmode=disable`; override it with `DATABASE_URL`. Set `ADDR` to change the listening address, for example `ADDR=:9000`.
 
 ## Develop styles
 

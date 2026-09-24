@@ -476,7 +476,7 @@ func (s *Server) routes() http.Handler {
 func main() {
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
-		url = "postgres://counter:counter@localhost:5433/counter?sslmode=disable"
+		url = "postgres://counter:counter@localhost:5432/counter?sslmode=disable"
 	}
 	db, err := openDB(context.Background(), url)
 	if err != nil {
@@ -485,7 +485,7 @@ func main() {
 	defer db.Close()
 	addr := os.Getenv("ADDR")
 	if addr == "" {
-		addr = ":8080"
+		addr = ":8886"
 	}
 	display := addr
 	if strings.HasPrefix(display, ":") {
