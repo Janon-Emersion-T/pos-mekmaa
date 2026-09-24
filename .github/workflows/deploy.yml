@@ -1,0 +1,119 @@
+name: Deploy Fridge POS
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+concurrency:
+  group: fridge-pos-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download Go dependencies
+        run: go mod download
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Build test binary
+        run: go build -o fridge-pos .
+
+  deploy:
+    name: Deploy Production
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/fridge_deploy
+          chmod 600 ~/.ssh/fridge_deploy
+
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy Fridge POS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/fridge_deploy \
+            "$VPS_USER@$VPS_HOST" << 'EOF'
+
+          set -e
+
+          echo "======================================"
+          echo " Deploying Mekmaa Fridge POS"
+          echo "======================================"
+
+          cd /var/www/fridge.mekmaa.com
+
+          echo "Fetching latest source..."
+          git fetch origin main
+          git reset --hard origin/main
+
+          echo "Installing frontend dependencies..."
+          npm ci
+
+          echo "Building Tailwind CSS..."
+          npm run css
+
+          echo "Running Go tests..."
+          go test ./...
+
+          echo "Building Go application..."
+          go build -o fridge-pos.new .
+
+          echo "Installing new binary..."
+          mv fridge-pos.new fridge-pos
+          chmod +x fridge-pos
+
+          echo "Restarting application..."
+          systemctl restart fridge-pos
+
+          echo "Checking service..."
+          sleep 2
+          systemctl is-active --quiet fridge-pos
+
+          echo "Checking local HTTP endpoint..."
+          curl --fail --silent --show-error \
+            http://127.0.0.1:8886/api/products > /dev/null
+
+          echo "======================================"
+          echo " Deployment successful"
+          echo "======================================"
+
+          EOF
+
+      - name: Verify production
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          sleep 2
+          curl --fail --silent --show-error \
+            https://fridge.mekmaa.com/api/products > /dev/null
+
+          echo "Production verification successful."
