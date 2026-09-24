@@ -21,6 +21,8 @@ Open http://localhost:8886. The PostgreSQL schema and starter products are creat
 
 The initial superadmin is seeded automatically on first launch. There is no public registration route; additional staff accounts should be created through an administrator workflow.
 
+Role access is enforced by the API: cashiers can operate sales, register sessions, sales history, and petty cash; admins also manage inventory and purchases; superadmins additionally create and manage staff users.
+
 ## Develop styles
 
 ```sh

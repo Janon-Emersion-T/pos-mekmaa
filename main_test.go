@@ -27,6 +27,27 @@ func TestAuthenticationGate(t *testing.T) {
 	}
 }
 
+func TestRoleChecks(t *testing.T) {
+	if !hasRole("superadmin", "superadmin") {
+		t.Fatal("superadmin should be authorized")
+	}
+	if !hasRole("cashier", "superadmin", "admin", "cashier") {
+		t.Fatal("cashier should be authorized for till operations")
+	}
+	if hasRole("cashier", "superadmin", "admin") {
+		t.Fatal("cashier must not be authorized for management operations")
+	}
+	called := false
+	h := requireRoles(func(http.ResponseWriter, *http.Request) { called = true }, "superadmin", "admin")
+	r := httptest.NewRequest(http.MethodPost, "/api/purchases", nil)
+	r = r.WithContext(context.WithValue(r.Context(), userContextKey, &User{Role: "cashier"}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if called || w.Code != http.StatusForbidden {
+		t.Fatalf("cashier management request: called=%v status=%d", called, w.Code)
+	}
+}
+
 func TestPostgresMigration(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {

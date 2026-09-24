@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -56,6 +57,17 @@ type Session struct {
 	ExpectedCash int        `json:"expectedCash"`
 	Status       string     `json:"status"`
 }
+type User struct {
+	ID        int64     `json:"id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+type contextKey string
+
+const userContextKey contextKey = "user"
+
 type Server struct{ db *sql.DB }
 
 func openDB(ctx context.Context, url string) (*sql.DB, error) {
@@ -516,18 +528,22 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "counter_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
 	respond(w, 200, map[string]bool{"ok": true})
 }
-func (s *Server) authenticated(r *http.Request) bool {
+func (s *Server) currentUser(r *http.Request) (*User, error) {
 	c, err := r.Cookie("counter_session")
 	if err != nil || len(c.Value) < 32 {
-		return false
+		return nil, sql.ErrNoRows
 	}
-	var ok bool
-	err = s.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM auth_sessions a JOIN users u ON u.id=a.user_id WHERE a.token_hash=$1 AND a.expires_at>now() AND u.active)`, tokenHash(c.Value)).Scan(&ok)
-	return err == nil && ok
+	var u User
+	err = s.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.role,u.active,u.created_at FROM auth_sessions a JOIN users u ON u.id=a.user_id WHERE a.token_hash=$1 AND a.expires_at>now() AND u.active`, tokenHash(c.Value)).Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.authenticated(r) {
+		u, err := s.currentUser(r)
+		if err != nil {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				problem(w, http.StatusUnauthorized, "Authentication required")
 			} else {
@@ -535,23 +551,174 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			}
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, u)))
 	})
+}
+func principal(r *http.Request) *User { u, _ := r.Context().Value(userContextKey).(*User); return u }
+func hasRole(role string, allowed ...string) bool {
+	for _, x := range allowed {
+		if role == x {
+			return true
+		}
+	}
+	return false
+}
+func requireRoles(next http.HandlerFunc, roles ...string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u := principal(r)
+		if u == nil || !hasRole(u.Role, roles...) {
+			problem(w, http.StatusForbidden, "You do not have permission to perform this action")
+			return
+		}
+		next(w, r)
+	})
+}
+func (s *Server) me(w http.ResponseWriter, r *http.Request) { respond(w, 200, principal(r)) }
+func (s *Server) users(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		rows, err := s.db.QueryContext(r.Context(), `SELECT id,email,role,active,created_at FROM users ORDER BY created_at`)
+		if err != nil {
+			problem(w, 500, "Could not load users")
+			return
+		}
+		defer rows.Close()
+		out := []User{}
+		for rows.Next() {
+			var u User
+			if rows.Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.CreatedAt) != nil {
+				problem(w, 500, "Could not read users")
+				return
+			}
+			out = append(out, u)
+		}
+		respond(w, 200, out)
+		return
+	}
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if !strings.Contains(req.Email, "@") || strings.ContainsAny(req.Email, "<>\"' \t\r\n") || len(req.Password) < 10 || !hasRole(req.Role, "superadmin", "admin", "cashier") {
+		problem(w, 400, "A valid email, role, and password of at least 10 characters are required")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		problem(w, 500, "Could not secure password")
+		return
+	}
+	var u User
+	err = s.db.QueryRowContext(r.Context(), `INSERT INTO users(email,password_hash,role) VALUES($1,$2,$3) ON CONFLICT(email) DO NOTHING RETURNING id,email,role,active,created_at`, req.Email, string(hash), req.Role).Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		problem(w, 409, "A user with this email already exists")
+		return
+	}
+	if err != nil {
+		problem(w, 500, "Could not create user")
+		return
+	}
+	respond(w, 201, u)
+}
+func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
+	idText := strings.TrimPrefix(r.URL.Path, "/api/users/")
+	id, err := strconv.ParseInt(idText, 10, 64)
+	if err != nil || id < 1 {
+		problem(w, 400, "Invalid user")
+		return
+	}
+	var req struct {
+		Role     string `json:"role"`
+		Active   *bool  `json:"active"`
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	actor := principal(r)
+	if actor.ID == id && (req.Active != nil && !*req.Active || req.Role != "" && req.Role != "superadmin") {
+		problem(w, 409, "You cannot deactivate or demote your own account")
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		problem(w, 500, "Could not update user")
+		return
+	}
+	defer tx.Rollback()
+	if req.Role != "" {
+		if !hasRole(req.Role, "superadmin", "admin", "cashier") {
+			problem(w, 400, "Invalid role")
+			return
+		}
+		if _, err = tx.ExecContext(r.Context(), `UPDATE users SET role=$1 WHERE id=$2`, req.Role, id); err != nil {
+			problem(w, 500, "Could not update user")
+			return
+		}
+	}
+	if req.Active != nil {
+		if _, err = tx.ExecContext(r.Context(), `UPDATE users SET active=$1 WHERE id=$2`, *req.Active, id); err != nil {
+			problem(w, 500, "Could not update user")
+			return
+		}
+		if !*req.Active {
+			_, _ = tx.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE user_id=$1`, id)
+		}
+	}
+	if req.Password != "" {
+		if len(req.Password) < 10 {
+			problem(w, 400, "Password must be at least 10 characters")
+			return
+		}
+		hash, e := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if e != nil {
+			problem(w, 500, "Could not secure password")
+			return
+		}
+		if _, err = tx.ExecContext(r.Context(), `UPDATE users SET password_hash=$1 WHERE id=$2`, string(hash), id); err != nil {
+			problem(w, 500, "Could not update password")
+			return
+		}
+		_, _ = tx.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE user_id=$1 AND user_id<>$2`, id, actor.ID)
+	}
+	result, err := tx.ExecContext(r.Context(), `UPDATE users SET email=email WHERE id=$1`, id)
+	if err != nil {
+		problem(w, 500, "Could not update user")
+		return
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		problem(w, 404, "User not found")
+		return
+	}
+	if tx.Commit() != nil {
+		problem(w, 500, "Could not update user")
+		return
+	}
+	respond(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) routes() http.Handler {
 	private := http.NewServeMux()
-	private.HandleFunc("GET /api/products", s.products)
-	private.HandleFunc("GET /api/sales", s.sales)
-	private.HandleFunc("POST /api/checkout", s.checkout)
-	private.HandleFunc("GET /api/session", s.sessions)
-	private.HandleFunc("POST /api/session/open", s.sessions)
-	private.HandleFunc("POST /api/session/close", s.sessions)
-	private.HandleFunc("GET /api/petty-cash", s.pettyCash)
-	private.HandleFunc("POST /api/petty-cash", s.pettyCash)
-	private.HandleFunc("GET /api/purchases", s.purchases)
-	private.HandleFunc("POST /api/purchases", s.purchases)
-	private.HandleFunc("GET /api/inventory/movements", s.inventory)
-	private.HandleFunc("POST /api/inventory/adjustments", s.inventory)
+	private.HandleFunc("GET /api/auth/me", s.me)
+	private.Handle("GET /api/products", requireRoles(s.products, "superadmin", "admin", "cashier"))
+	private.Handle("GET /api/sales", requireRoles(s.sales, "superadmin", "admin", "cashier"))
+	private.Handle("POST /api/checkout", requireRoles(s.checkout, "superadmin", "admin", "cashier"))
+	private.Handle("GET /api/session", requireRoles(s.sessions, "superadmin", "admin", "cashier"))
+	private.Handle("POST /api/session/open", requireRoles(s.sessions, "superadmin", "admin", "cashier"))
+	private.Handle("POST /api/session/close", requireRoles(s.sessions, "superadmin", "admin", "cashier"))
+	private.Handle("GET /api/petty-cash", requireRoles(s.pettyCash, "superadmin", "admin", "cashier"))
+	private.Handle("POST /api/petty-cash", requireRoles(s.pettyCash, "superadmin", "admin", "cashier"))
+	private.Handle("GET /api/purchases", requireRoles(s.purchases, "superadmin", "admin"))
+	private.Handle("POST /api/purchases", requireRoles(s.purchases, "superadmin", "admin"))
+	private.Handle("GET /api/inventory/movements", requireRoles(s.inventory, "superadmin", "admin"))
+	private.Handle("POST /api/inventory/adjustments", requireRoles(s.inventory, "superadmin", "admin"))
+	private.Handle("GET /api/users", requireRoles(s.users, "superadmin"))
+	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
+	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
 	private.Handle("/", http.FileServer(http.FS(sub)))
 	mux := http.NewServeMux()
@@ -559,7 +726,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", s.logout)
 	mux.HandleFunc("GET /styles.css", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, sub, "styles.css") })
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
-		if s.authenticated(r) {
+		if _, err := s.currentUser(r); err == nil {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
