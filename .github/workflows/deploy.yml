@@ -1,30 +1,43 @@
-name: Deploy Fridge POS
+name: CI and Deploy Fridge POS
 
 on:
   push:
-    branches:
-      - main
-
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: fridge-pos-production
   cancel-in-progress: false
 
 jobs:
-  test:
-    name: Test
+  ci:
+    name: Build and test
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tailwind CSS
+        run: npm run css
 
       - name: Download Go dependencies
         run: go mod download
@@ -32,88 +45,132 @@ jobs:
       - name: Run Go tests
         run: go test ./...
 
-      - name: Build test binary
-        run: go build -o fridge-pos .
+      - name: Build application
+        run: go build -trimpath -o fridge-pos .
 
   deploy:
-    name: Deploy Production
-    needs: test
+    name: Deploy production
+    needs: ci
     runs-on: ubuntu-latest
-
+    timeout-minutes: 20
+    environment: production
     steps:
       - name: Configure SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
+          set -eu
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/fridge_deploy"
+          chmod 600 "$HOME/.ssh/fridge_deploy"
+          ssh-keyscan -H "$VPS_HOST" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
 
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/fridge_deploy
-          chmod 600 ~/.ssh/fridge_deploy
-
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
-
-      - name: Deploy Fridge POS
+      - name: Build and release on VPS
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          ssh -i ~/.ssh/fridge_deploy \
-            "$VPS_USER@$VPS_HOST" << 'EOF'
+          ssh -T \
+            -i "$HOME/.ssh/fridge_deploy" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=3 \
+            "$VPS_USER@$VPS_HOST" 'bash -se' <<'DEPLOY'
+          set -Eeuo pipefail
 
-          set -e
+          readonly APP_DIR=/var/www/fridge.mekmaa.com
+          readonly SERVICE=fridge-pos
+          readonly BINARY="$APP_DIR/fridge-pos"
+          readonly NEW_BINARY="$APP_DIR/fridge-pos.new"
+          readonly BACKUP_BINARY="$APP_DIR/fridge-pos.backup"
+          readonly HEALTH_URL=http://127.0.0.1:8886/login
 
-          echo "======================================"
-          echo " Deploying Mekmaa Fridge POS"
-          echo "======================================"
+          cd "$APP_DIR"
 
-          cd /var/www/fridge.mekmaa.com
-
-          echo "Fetching latest source..."
+          echo "Fetching the requested release..."
           git fetch origin main
           git reset --hard origin/main
 
-          echo "Installing frontend dependencies..."
+          echo "Building frontend assets..."
           npm ci
-
-          echo "Building Tailwind CSS..."
           npm run css
 
-          echo "Running Go tests..."
+          echo "Testing and building the application..."
+          go mod download
           go test ./...
+          rm -f "$NEW_BINARY"
+          go build -trimpath -o "$NEW_BINARY" .
+          test -s "$NEW_BINARY"
+          chmod 0755 "$NEW_BINARY"
 
-          echo "Building Go application..."
-          go build -o fridge-pos.new .
+          rollback() {
+            echo "Release verification failed; restoring the previous binary." >&2
+            set +e
+            systemctl status "$SERVICE" --no-pager --full >&2
+            journalctl -u "$SERVICE" -n 100 --no-pager >&2
+            if [ -s "$BACKUP_BINARY" ]; then
+              install -m 0755 "$BACKUP_BINARY" "$BINARY"
+              systemctl restart "$SERVICE"
+              if systemctl is-active --quiet "$SERVICE"; then
+                echo "Previous release restored and service restarted." >&2
+              else
+                echo "Rollback was installed, but the service did not become active." >&2
+                systemctl status "$SERVICE" --no-pager --full >&2
+                journalctl -u "$SERVICE" -n 100 --no-pager >&2
+              fi
+            else
+              echo "No rollback binary was available." >&2
+            fi
+            exit 1
+          }
 
-          echo "Installing new binary..."
-          mv fridge-pos.new fridge-pos
-          chmod +x fridge-pos
+          if [ ! -s "$BINARY" ]; then
+            echo "Current production binary is missing; refusing an unsafe release." >&2
+            exit 1
+          fi
 
-          echo "Restarting application..."
-          systemctl restart fridge-pos
+          echo "Preserving the current production binary..."
+          install -m 0755 "$BINARY" "$BACKUP_BINARY"
 
-          echo "Checking service..."
-          sleep 2
-          systemctl is-active --quiet fridge-pos
+          echo "Installing the new release..."
+          mv -f "$NEW_BINARY" "$BINARY"
+          if ! systemctl restart "$SERVICE"; then
+            rollback
+          fi
 
-          echo "Checking local HTTP endpoint..."
-          curl --fail --silent --show-error \
-            http://127.0.0.1:8886/api/products > /dev/null
+          echo "Waiting for the local health check..."
+          healthy=false
+          for attempt in $(seq 1 20); do
+            if systemctl is-active --quiet "$SERVICE" && \
+               curl --fail --silent --show-error --max-time 5 "$HEALTH_URL" > /dev/null; then
+              healthy=true
+              break
+            fi
+            echo "Health check attempt $attempt/20 did not pass yet."
+            sleep 2
+          done
 
-          echo "======================================"
-          echo " Deployment successful"
-          echo "======================================"
+          if [ "$healthy" != true ]; then
+            rollback
+          fi
 
-          EOF
+          echo "Production release passed the local health check."
+          DEPLOY
 
-      - name: Verify production
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
+      - name: Verify public endpoint
         run: |
-          sleep 2
-          curl --fail --silent --show-error \
-            https://fridge.mekmaa.com/api/products > /dev/null
-
-          echo "Production verification successful."
+          set -eu
+          for attempt in $(seq 1 10); do
+            if curl --fail --silent --show-error --max-time 10 \
+              https://fridge.mekmaa.com/login > /dev/null; then
+              echo "Public production verification passed."
+              exit 0
+            fi
+            echo "Public verification attempt $attempt/10 did not pass yet."
+            sleep 3
+          done
+          echo "Public production verification failed: /login did not return HTTP 200." >&2
+          exit 1

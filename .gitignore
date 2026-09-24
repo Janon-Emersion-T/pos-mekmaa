@@ -1,3 +1,6 @@
 node_modules/
 counter
+fridge-pos
+fridge-pos.new
+fridge-pos.backup
 .env
