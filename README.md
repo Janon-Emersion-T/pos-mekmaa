@@ -56,3 +56,11 @@ Use **Delete** to remove one product or **Delete all products** to clear the act
 Complete order opens a review dialog showing line items, payment method, and total. Cancel or Escape returns to the cart without creating a sale. Confirm sale records the payment; checkout rejects a total that changed after review.
 
 Only superadmins see **Delete sale** in Sales history, and the API enforces the same restriction. Deletion requires confirmation and a reason. It removes the sale from normal history, restores product stock once, and excludes the sale from its original register's expected cash. Closed-register counted cash remains unchanged. The sale, line items, deleting user, timestamp, reason, and stock reversal remain recorded for audit. This corrects an erroneous sale; it does not issue a cash or card refund.
+
+## Register sessions and staff tracking
+
+The store uses one shared open register session. Every sale is linked to that session and the authenticated staff member who completes it. The POS blocks checkout until a session is open and shows the session, opener, and current cashier. Confirmation and receipts include the cashier and session; Sales history shows staff IDs and offers session links to filter sales.
+
+Register session history shows opening/closing staff and times, sale counts and totals, counted cash, expected cash at close, and differences. New sales and session actions save staff email snapshots alongside user IDs. Legacy records without staff attribution display “Not recorded”; attribution is not invented. Closing cash expectations from before this feature are also shown as not recorded.
+
+Checkout, petty cash, sale deletion, and session closing lock the register row during their transactions. A concurrent sale either commits before closing and is included in closing totals, or is rejected after the session closes. The browser also sends the reviewed session ID to reject checkout against a replaced session. Expected cash at close is preserved even if a sale is subsequently deleted.

@@ -70,6 +70,7 @@ let products = [],
   movements = [],
   users = [],
   session = null,
+  sessionHistory = [],
   currentUser = null,
   cart = new Map(),
   category = "",
@@ -93,7 +94,7 @@ function canVisit(next) {
 function pageFromURL() {
   return location.pathname.replace(/^\/|\/$/g, "") || "pos";
 }
-window.addEventListener("popstate", () => navigate(pageFromURL(), false));
+window.addEventListener("popstate", () => navigate(pageFromURL(), false, location.search));
 async function api(path, options) {
   const r = await fetch(path, options);
   if (r.status === 401) {
@@ -158,7 +159,17 @@ function renderCart() {
   $("#cart-count").textContent = `(${count})`;
   $("#subtotal").textContent = $("#total").textContent = money(total);
   $("#tax").textContent = money(0);
-  $("#checkout").disabled = !count || busy || !moneyFormatter;
+  $("#checkout").disabled = !count || busy || !moneyFormatter || !session;
+  for (const [openClass, closedClass] of [["border-green-100","border-gray-200"],["bg-green-50","bg-gray-50"],["text-green-700","text-gray-500"]]) {
+    $("#register-badge").classList.toggle(openClass, Boolean(session));
+    $("#register-badge").classList.toggle(closedClass, !session);
+  }
+  $("#register-dot").classList.toggle("bg-green-500", Boolean(session));
+  $("#register-dot").classList.toggle("bg-gray-400", !session);
+  $("#register-status").textContent = session ? `Register #${session.id} open` : "Register closed";
+  $("#session-notice").innerHTML = session
+    ? `<p class="font-medium">Session #${session.id} · ${escapeHTML(currentUser?.email || "")}</p><p>Opened by ${escapeHTML(session.openedByEmail)} · ${new Date(session.openedAt).toLocaleString()}</p>`
+    : '<p class="font-medium">Open a register session to complete a sale.</p><a href="/session" data-page="session" class="text-orange-600">Open register →</a>';
 }
 function add(id, delta = 1) {
   if (busy) return;
@@ -244,22 +255,26 @@ function renderOther() {
       );
   } else if (page === "sales") {
     title = "Sales history";
-    desc = "Orders are tied to the register session that created them.";
+    const filterSession = new URLSearchParams(location.search).get("sessionId");
+    desc = filterSession ? `Sales for session #${escapeHTML(filterSession)}. Showing up to 100 recent sales.` : "Track the staff member and register session for each sale. Showing up to 100 recent sales.";
     body = table(
-      ["Order", "Date", "Items", "Payment", "Total", ...(currentUser.role === "superadmin" ? ["Action"] : [])],
+      ["Order", "Date", "Cashier", "Session", "Items", "Payment", "Total", ...(currentUser.role === "superadmin" ? ["Action"] : [])],
       sales
         .map(
           (s) =>
-            `<tr class="border-b"><td class="p-4 font-semibold">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${escapeHTML(s.items)}</td><td class="p-4 capitalize">${s.payment}</td><td class="p-4 font-semibold">${money(s.total)}</td>${currentUser.role === "superadmin" ? `<td class="p-4"><button data-delete-sale="${s.id}" class="rounded-lg border border-red-200 px-3 py-2 text-xs text-red-600 disabled:opacity-50" aria-label="Delete sale #${s.id}">Delete sale</button></td>` : ""}</tr>`,
+            `<tr class="border-b"><td class="p-4 font-semibold">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${escapeHTML(s.cashierEmail)}<span class="block text-[10px] text-gray-400">${s.createdBy ? "Staff #" + s.createdBy : ""}</span></td><td class="p-4"><a href="/sales?sessionId=${s.sessionId}" data-page="sales" class="text-orange-600">#${s.sessionId}</a></td><td class="p-4">${escapeHTML(s.items)}</td><td class="p-4 capitalize">${s.payment}</td><td class="p-4 font-semibold">${money(s.total)}</td>${currentUser.role === "superadmin" ? `<td class="p-4"><button data-delete-sale="${s.id}" class="rounded-lg border border-red-200 px-3 py-2 text-xs text-red-600 disabled:opacity-50" aria-label="Delete sale #${s.id}">Delete sale</button></td>` : ""}</tr>`,
         )
         .join(""),
     );
+    if (filterSession) body = '<a href="/sales" data-page="sales" class="mb-4 block text-sm text-orange-600">← All sales</a>' + body;
   } else if (page === "session") {
     title = "Register session";
     desc =
       "Open the till before selling. Expected cash includes cash sales and petty cash movements.";
     body = session
       ? `<div class="grid gap-4 sm:grid-cols-3">${[
+          ["Session", "#" + session.id],
+          ["Opened by", escapeHTML(session.openedByEmail)],
           ["Opened", new Date(session.openedAt).toLocaleString()],
           ["Opening cash", money(session.openingCash)],
           ["Expected cash", money(session.expectedCash)],
@@ -270,8 +285,12 @@ function renderOther() {
           )
           .join(
             "",
-          )}</div><form data-form="close-session" class="mt-6 max-w-md rounded-xl border bg-white p-5">${amountField("Counted closing cash", "closingCash")}<button class="mt-4 rounded-lg bg-ink px-5 py-3 text-sm text-white">Close session</button></form>`
+          )}</div><form data-form="close-session" data-session-id="${session.id}" class="mt-6 max-w-md rounded-xl border bg-white p-5">${amountField("Counted closing cash", "closingCash")}<button class="mt-4 rounded-lg bg-ink px-5 py-3 text-sm text-white">Close session</button></form>`
       : `<form data-form="open-session" class="max-w-md rounded-xl border bg-white p-5">${amountField("Opening cash", "openingCash", "0.00")}<button class="mt-4 rounded-lg bg-accent px-5 py-3 text-sm text-white">Open register session</button></form>`;
+    body += '<h2 class="mb-3 mt-7 font-semibold">Session history</h2><p class="mb-4 text-xs text-gray-500">Latest 100 sessions. Expected cash at close is preserved even if a sale is later deleted.</p>' + table(
+      ["Session", "Opened by", "Opened", "Closed by", "Closed", "Status", "Sales", "Sales total", "Expected at close", "Counted cash", "Difference"],
+      sessionHistory.map((x) => `<tr class="border-b"><td class="p-4"><a href="/sales?sessionId=${x.id}" data-page="sales" class="text-orange-600">#${x.id}</a></td><td class="p-4">${escapeHTML(x.openedByEmail)}</td><td class="p-4">${new Date(x.openedAt).toLocaleString()}</td><td class="p-4">${x.closedAt ? escapeHTML(x.closedByEmail) : "—"}</td><td class="p-4">${x.closedAt ? new Date(x.closedAt).toLocaleString() : "—"}</td><td class="p-4 capitalize">${x.status}</td><td class="p-4">${x.saleCount}</td><td class="p-4">${money(x.salesTotal)}</td><td class="p-4">${x.closingExpectedCash == null ? (x.closedAt ? "Not recorded" : "—") : money(x.closingExpectedCash)}</td><td class="p-4">${x.closingCash == null ? "—" : money(x.closingCash)}</td><td class="p-4">${x.closingExpectedCash == null || x.closingCash == null ? "—" : money(x.closingCash - x.closingExpectedCash)}</td></tr>`).join("")
+    );
   } else if (page === "inventory") {
     title = "Inventory";
     desc = "Current stock plus an audit trail. No expiry or batch tracking.";
@@ -336,7 +355,7 @@ function renderOther() {
 async function loadPage() {
   const request = ++pageRequest, requestedPage = page;
   try {
-    const endpoints = { sales: "/api/sales", inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
+    const endpoints = { session: "/api/sessions", sales: "/api/sales" + location.search, inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
     const [savedSettings, savedProducts, savedSession, records] = await Promise.all([
       api("/api/settings"), api("/api/products"), api("/api/session"),
       endpoints[requestedPage] ? api(endpoints[requestedPage]) : Promise.resolve(null),
@@ -346,6 +365,7 @@ async function loadPage() {
     products = savedProducts;
     session = savedSession;
     if (requestedPage === "sales") sales = records;
+    if (requestedPage === "session") sessionHistory = records;
     if (requestedPage === "inventory") movements = records;
     if (requestedPage === "purchases") purchases = records;
     if (requestedPage === "petty") petty = records;
@@ -359,12 +379,12 @@ async function loadPage() {
     if (page !== "pos") $("#other-page").innerHTML = '<p class="text-sm text-red-500">Could not load this page. Select the menu again to retry.</p>';
   }
 }
-async function navigate(next, push = true) {
+async function navigate(next, push = true, query = "") {
   if (!currentUser) return;
-  if (!canVisit(next)) { next = "pos"; push = false; }
+  if (!canVisit(next)) { next = "pos"; push = false; query = ""; }
   page = next;
-  const path = "/" + page;
-  if (location.pathname !== path) history[push ? "pushState" : "replaceState"]({}, "", path);
+  const path = "/" + page + query;
+  if (location.pathname + location.search !== path) history[push ? "pushState" : "replaceState"]({}, "", path);
   $("#pos-page").classList.toggle("hidden", page !== "pos");
   $("#other-page").classList.toggle("hidden", page === "pos");
   $("#breadcrumb").textContent = pageTitles[page];
@@ -424,7 +444,7 @@ document.addEventListener("click", async (e) => {
   if (d) add(Number(d.dataset.id), Number(d.dataset.delta));
   if (n && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.button === 0) {
     e.preventDefault();
-    navigate(n.dataset.page);
+    navigate(n.dataset.page, true, new URL(n.href, location.href).search);
   }
   const deleteSale = e.target.closest("[data-delete-sale]");
   if (deleteSale && currentUser.role === "superadmin" && !deleteSale.disabled) {
@@ -527,14 +547,15 @@ $("#clear").onclick = () => {
     }),
 );
 $("#checkout").onclick = async () => {
-  if (busy || !cart.size) return;
+  if (busy || !cart.size || !session) return;
   busy = true;
   renderCart();
   try {
+    const checkoutSession = session.id;
     const total = [...cart].reduce((sum, [id, quantity]) => sum + products.find((p) => p.id === id).price * quantity, 0);
     const confirmation = await confirmAction({
       title: "Complete this order?",
-      description: "Review the order and confirm that payment has been received.",
+      description: `Session #${checkoutSession} · Cashier: ${currentUser.email}. Review the order and confirm that payment has been received.`,
       details: `<div class="space-y-3">${[...cart].map(([id, quantity]) => {
         const p = products.find((p) => p.id === id);
         return `<div class="flex justify-between gap-3"><span>${quantity} × ${escapeHTML(p.name)}</span><span class="shrink-0">${money(p.price * quantity)}</span></div>`;
@@ -552,10 +573,11 @@ $("#checkout").onclick = async () => {
         })),
         payment,
         expectedTotal: total,
+        sessionId: checkoutSession,
       }),
     });
     $("#receipt").innerHTML =
-      `<div class="text-center"><div class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-50 text-xl text-green-600">✓</div><h2 class="text-xl font-semibold">Order complete!</h2><p class="mt-2 text-xs text-gray-400">The Daily Grind · ${service}</p><p class="mt-1 text-xs text-gray-400">Order #${String(sale.id).padStart(4, "0")} · ${new Date(sale.created).toLocaleString()}</p></div><div class="my-6 border-y border-dashed py-5 text-sm leading-7">${[
+      `<div class="text-center"><div class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-50 text-xl text-green-600">✓</div><h2 class="text-xl font-semibold">Order complete!</h2><p class="mt-2 text-xs text-gray-400">The Daily Grind · ${service}</p><p class="mt-1 text-xs text-gray-400">Order #${String(sale.id).padStart(4, "0")} · ${new Date(sale.created).toLocaleString()}</p><p class="mt-2 text-xs text-gray-500">Session #${sale.sessionId} · Cashier: ${escapeHTML(sale.cashierEmail)}</p></div><div class="my-6 border-y border-dashed py-5 text-sm leading-7">${[
         ...cart,
       ]
         .map(([id, q]) => {
@@ -576,6 +598,7 @@ $("#checkout").onclick = async () => {
   } catch (e) {
     toast(e.message);
   } finally {
+    try { session = await api("/api/session"); } catch { session = null; }
     busy = false;
     renderCart();
   }
@@ -646,7 +669,7 @@ $("#other-page").addEventListener("submit", async (e) => {
       const result = await api("/api/session/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ closingCash: minorUnits(data.closingCash) }),
+        body: JSON.stringify({ closingCash: minorUnits(data.closingCash), sessionId: Number(f.dataset.sessionId) }),
       });
       toast(`Session closed · difference ${money(result.difference)}`);
     }
@@ -735,7 +758,7 @@ $("#other-page").addEventListener("submit", async (e) => {
     $("#user-initials").textContent = currentUser.email
       .slice(0, 2)
       .toUpperCase();
-    await navigate(pageFromURL(), false);
+    await navigate(pageFromURL(), false, location.search);
     if (!session) toast("Open a register session before making sales");
   } catch (e) {
     $("#products").innerHTML =

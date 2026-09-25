@@ -32,6 +32,19 @@ func (s *Server) deleteSale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	var sessionID int64
+	if err = tx.QueryRowContext(r.Context(), `SELECT session_id FROM sales WHERE id=$1`, id).Scan(&sessionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			problem(w, 404, "Sale not found")
+		} else {
+			problem(w, 500, "Could not load sale")
+		}
+		return
+	}
+	if err = tx.QueryRowContext(r.Context(), `SELECT id FROM register_sessions WHERE id=$1 FOR UPDATE`, sessionID).Scan(&sessionID); err != nil {
+		problem(w, 500, "Could not load session")
+		return
+	}
 	var deleted sql.NullTime
 	err = tx.QueryRowContext(r.Context(), `SELECT deleted_at FROM sales WHERE id=$1 FOR UPDATE`, id).Scan(&deleted)
 	if errors.Is(err, sql.ErrNoRows) {

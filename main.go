@@ -42,21 +42,30 @@ type Line struct {
 	UnitCost  int `json:"unitCost,omitempty"`
 }
 type Sale struct {
-	ID        int64     `json:"id"`
-	Created   time.Time `json:"created"`
-	Total     int       `json:"total"`
-	Payment   string    `json:"payment"`
-	Items     string    `json:"items"`
-	SessionID int64     `json:"sessionId"`
+	ID           int64     `json:"id"`
+	Created      time.Time `json:"created"`
+	Total        int       `json:"total"`
+	Payment      string    `json:"payment"`
+	Items        string    `json:"items"`
+	SessionID    int64     `json:"sessionId"`
+	CreatedBy    int64     `json:"createdBy"`
+	CashierEmail string    `json:"cashierEmail"`
 }
 type Session struct {
-	ID           int64      `json:"id"`
-	OpenedAt     time.Time  `json:"openedAt"`
-	ClosedAt     *time.Time `json:"closedAt"`
-	OpeningCash  int        `json:"openingCash"`
-	ClosingCash  *int       `json:"closingCash"`
-	ExpectedCash int        `json:"expectedCash"`
-	Status       string     `json:"status"`
+	OpenedBy            int64      `json:"openedBy"`
+	OpenedByEmail       string     `json:"openedByEmail"`
+	ClosedBy            int64      `json:"closedBy"`
+	ClosedByEmail       string     `json:"closedByEmail"`
+	ClosingExpectedCash *int       `json:"closingExpectedCash"`
+	SaleCount           int        `json:"saleCount"`
+	SalesTotal          int        `json:"salesTotal"`
+	ID                  int64      `json:"id"`
+	OpenedAt            time.Time  `json:"openedAt"`
+	ClosedAt            *time.Time `json:"closedAt"`
+	OpeningCash         int        `json:"openingCash"`
+	ClosingCash         *int       `json:"closingCash"`
+	ExpectedCash        int        `json:"expectedCash"`
+	Status              string     `json:"status"`
 }
 type User struct {
 	ID        int64     `json:"id"`
@@ -176,7 +185,7 @@ func (s *Server) activeSession(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }) (Session, error) {
 	var x Session
-	err := q.QueryRowContext(ctx, `SELECT id,opened_at,closed_at,opening_cash,closing_cash,status,opening_cash+COALESCE((SELECT SUM(total) FROM sales WHERE session_id=register_sessions.id AND payment='cash' AND deleted_at IS NULL),0)+COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM petty_cash_entries WHERE session_id=register_sessions.id),0) FROM register_sessions WHERE status='open' ORDER BY id DESC LIMIT 1`).Scan(&x.ID, &x.OpenedAt, &x.ClosedAt, &x.OpeningCash, &x.ClosingCash, &x.Status, &x.ExpectedCash)
+	err := scanSession(q.QueryRowContext(ctx, sessionColumns+"WHERE r.status='open' ORDER BY r.id DESC LIMIT 1"), &x)
 	return x, err
 }
 
@@ -251,7 +260,16 @@ func (s *Server) products(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, out)
 }
 func (s *Server) sales(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT s.id,s.created_at,s.total,s.payment,string_agg(si.quantity||' × '||si.product_name,', ' ORDER BY si.id),s.session_id FROM sales s JOIN sale_items si ON si.sale_id=s.id WHERE s.deleted_at IS NULL GROUP BY s.id ORDER BY s.id DESC LIMIT 100`)
+	var sessionID int64
+	if raw := r.URL.Query().Get("sessionId"); raw != "" {
+		var err error
+		sessionID, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || sessionID < 1 {
+			problem(w, 400, "Invalid session")
+			return
+		}
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT s.id,s.created_at,s.total,s.payment,string_agg(si.quantity||' × '||si.product_name,', ' ORDER BY si.id),s.session_id,COALESCE(s.created_by,0),COALESCE(s.cashier_email,'Not recorded') FROM sales s JOIN sale_items si ON si.sale_id=s.id WHERE s.deleted_at IS NULL AND ($1::bigint=0 OR s.session_id=$1) GROUP BY s.id ORDER BY s.id DESC LIMIT 100`, sessionID)
 	if err != nil {
 		problem(w, 500, "Could not load sales")
 		return
@@ -260,7 +278,7 @@ func (s *Server) sales(w http.ResponseWriter, r *http.Request) {
 	out := []Sale{}
 	for rows.Next() {
 		var x Sale
-		if rows.Scan(&x.ID, &x.Created, &x.Total, &x.Payment, &x.Items, &x.SessionID) != nil {
+		if rows.Scan(&x.ID, &x.Created, &x.Total, &x.Payment, &x.Items, &x.SessionID, &x.CreatedBy, &x.CashierEmail) != nil {
 			problem(w, 500, "Could not read sales")
 			return
 		}
@@ -273,6 +291,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		Items         []Line `json:"items"`
 		Payment       string `json:"payment"`
 		ExpectedTotal *int   `json:"expectedTotal"`
+		SessionID     *int64 `json:"sessionId"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -295,13 +314,17 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	session, err := s.activeSession(r.Context(), tx)
+	session, err := s.lockedSession(r.Context(), tx)
 	if errors.Is(err, sql.ErrNoRows) {
 		problem(w, 409, "Open a register session before making a sale")
 		return
 	}
 	if err != nil {
 		problem(w, 500, "Could not read session")
+		return
+	}
+	if req.SessionID != nil && *req.SessionID != session.ID {
+		problem(w, 409, "The register session has changed. Review the active session before selling.")
 		return
 	}
 	total := 0
@@ -336,7 +359,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	created := time.Now()
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by) VALUES($1,$2,$3,$4) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID).Scan(&id, &created); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by,cashier_email) VALUES($1,$2,$3,$4,$5) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID, principal(r).Email).Scan(&id, &created); err != nil {
 		problem(w, 500, "Could not save sale")
 		return
 	}
@@ -359,7 +382,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not complete sale")
 		return
 	}
-	respond(w, 201, Sale{id, created, total, req.Payment, strings.Join(names, ", "), session.ID})
+	respond(w, 201, Sale{ID: id, Created: created, Total: total, Payment: req.Payment, Items: strings.Join(names, ", "), SessionID: session.ID, CreatedBy: principal(r).ID, CashierEmail: principal(r).Email})
 }
 func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -376,8 +399,9 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		OpeningCash int `json:"openingCash"`
-		ClosingCash int `json:"closingCash"`
+		OpeningCash int    `json:"openingCash"`
+		ClosingCash int    `json:"closingCash"`
+		SessionID   *int64 `json:"sessionId"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -388,7 +412,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasSuffix(r.URL.Path, "/open") {
 		var id int64
-		err := s.db.QueryRowContext(r.Context(), `INSERT INTO register_sessions(opening_cash,opened_by) SELECT $1,$2 WHERE NOT EXISTS(SELECT 1 FROM register_sessions WHERE status='open') RETURNING id`, req.OpeningCash, principal(r).ID).Scan(&id)
+		err := s.db.QueryRowContext(r.Context(), `INSERT INTO register_sessions(opening_cash,opened_by,opened_by_email) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id`, req.OpeningCash, principal(r).ID, principal(r).Email).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			problem(w, 409, "A register session is already open")
 			return
@@ -400,13 +424,23 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		respond(w, 201, map[string]any{"id": id})
 		return
 	}
-	x, err := s.activeSession(r.Context(), s.db)
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		problem(w, 500, "Could not close session")
+		return
+	}
+	defer tx.Rollback()
+	x, err := s.lockedSession(r.Context(), tx)
 	if err != nil {
 		problem(w, 409, "No register session is open")
 		return
 	}
-	_, err = s.db.ExecContext(r.Context(), `UPDATE register_sessions SET status='closed',closed_at=now(),closing_cash=$1,closed_by=$2 WHERE id=$3`, req.ClosingCash, principal(r).ID, x.ID)
-	if err != nil {
+	if req.SessionID != nil && *req.SessionID != x.ID {
+		problem(w, 409, "The register session has changed. Refresh before closing.")
+		return
+	}
+	_, err = tx.ExecContext(r.Context(), `UPDATE register_sessions SET status='closed',closed_at=now(),closing_cash=$1,closed_by=$2,closed_by_email=$3,closing_expected_cash=$4 WHERE id=$5`, req.ClosingCash, principal(r).ID, principal(r).Email, x.ExpectedCash, x.ID)
+	if err != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not close session")
 		return
 	}
@@ -447,14 +481,20 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Direction, amount and category are required")
 		return
 	}
-	x, err := s.activeSession(r.Context(), s.db)
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		problem(w, 500, "Could not save entry")
+		return
+	}
+	defer tx.Rollback()
+	x, err := s.lockedSession(r.Context(), tx)
 	if err != nil {
 		problem(w, 409, "Open a register session first")
 		return
 	}
 	var id int64
-	err = s.db.QueryRowContext(r.Context(), `INSERT INTO petty_cash_entries(session_id,direction,amount,category,note,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, x.ID, req.Direction, req.Amount, req.Category, req.Note, principal(r).ID).Scan(&id)
-	if err != nil {
+	err = tx.QueryRowContext(r.Context(), `INSERT INTO petty_cash_entries(session_id,direction,amount,category,note,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, x.ID, req.Direction, req.Amount, req.Category, req.Note, principal(r).ID).Scan(&id)
+	if err != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not save entry")
 		return
 	}
@@ -838,6 +878,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("DELETE /api/sales/{id}", requireRoles(s.deleteSale, "superadmin"))
 	private.Handle("GET /api/sales", requireRoles(s.sales, "superadmin", "admin", "cashier"))
 	private.Handle("POST /api/checkout", requireRoles(s.checkout, "superadmin", "admin", "cashier"))
+	private.Handle("GET /api/sessions", requireRoles(s.sessionHistory, "superadmin", "admin", "cashier"))
 	private.Handle("GET /api/session", requireRoles(s.sessions, "superadmin", "admin", "cashier"))
 	private.Handle("POST /api/session/open", requireRoles(s.sessions, "superadmin", "admin", "cashier"))
 	private.Handle("POST /api/session/close", requireRoles(s.sessions, "superadmin", "admin", "cashier"))
