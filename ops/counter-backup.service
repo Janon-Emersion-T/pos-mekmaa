@@ -1,0 +1,17 @@
+[Unit]
+Description=Counter POS backup with recovery verification
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=counter-backup
+Group=counter-backup
+EnvironmentFile=/etc/counter-backup.env
+ExecStart=/usr/bin/python3 /opt/counter/ops/backup.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/counter
+TimeoutStartSec=1h

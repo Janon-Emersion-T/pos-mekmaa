@@ -7,10 +7,47 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestProductAppearanceValidation(t *testing.T) {
+	for _, art := range []string{"", "box", "bottle", "none", "coffee", "iced", "matcha", "tea", "croissant", "cookie", "toast", "sandwich", "cake", "roll"} {
+		t.Run(art, func(t *testing.T) {
+			p := productInput{Name: "Product", CategoryID: 1, Price: 12550, Cost: 7550, Stock: 8, ReorderLevel: 2, Art: art, Color: "#aabbcc"}
+			if !p.validate() {
+				t.Fatalf("valid product rejected with appearance %q", art)
+			}
+		})
+	}
+}
+
+// Every appearance offered by the form must also be accepted by the API.
+func TestProductFormAppearancesAccepted(t *testing.T) {
+	source, err := os.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`const appearances = (\[[^;]+\]);`).FindSubmatch(source)
+	if len(match) != 2 {
+		t.Fatal("product form appearance options not found")
+	}
+	var appearances []string
+	if err := json.Unmarshal(match[1], &appearances); err != nil {
+		t.Fatal(err)
+	}
+	if len(appearances) == 0 {
+		t.Fatal("product form has no appearance options")
+	}
+	for _, art := range appearances {
+		p := productInput{Name: "Product", CategoryID: 1, Art: art}
+		if !p.validate() {
+			t.Errorf("form offers appearance %q, but API rejects it", art)
+		}
+	}
+}
 
 func TestProductValidation(t *testing.T) {
 	for _, body := range []string{

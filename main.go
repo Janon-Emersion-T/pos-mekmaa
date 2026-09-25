@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,9 @@ import (
 var assets embed.FS
 
 type Product struct {
+	SKU          string `json:"sku"`
+	Barcode      string `json:"barcode"`
+	ImageID      *int64 `json:"imageId"`
 	ID           int    `json:"id"`
 	Name         string `json:"name"`
 	Category     string `json:"category"`
@@ -43,6 +47,15 @@ type Line struct {
 	UnitCost  int `json:"unitCost,omitempty"`
 }
 type Sale struct {
+	Currency         string        `json:"currency"`
+	CurrencyInferred bool          `json:"currencyInferred"`
+	CashReceived     *int          `json:"cashReceived"`
+	ChangeDue        *int          `json:"changeDue"`
+	Refunded         int           `json:"refunded"`
+	DeletedAt        *time.Time    `json:"deletedAt"`
+	DeletionReason   string        `json:"deletionReason"`
+	Lines            []ReceiptLine `json:"lines,omitempty"`
+
 	ID           int64     `json:"id"`
 	Created      time.Time `json:"created"`
 	Total        int       `json:"total"`
@@ -53,6 +66,8 @@ type Sale struct {
 	CashierEmail string    `json:"cashierEmail"`
 }
 type Session struct {
+	Currency            string     `json:"currency"`
+	RefundTotal         int        `json:"refundTotal"`
 	OpenedBy            int64      `json:"openedBy"`
 	OpenedByEmail       string     `json:"openedByEmail"`
 	ClosedBy            int64      `json:"closedBy"`
@@ -69,11 +84,12 @@ type Session struct {
 	Status              string     `json:"status"`
 }
 type User struct {
-	ID        int64     `json:"id"`
-	Email     string    `json:"email"`
-	Role      string    `json:"role"`
-	Active    bool      `json:"active"`
-	CreatedAt time.Time `json:"createdAt"`
+	MustChangePassword bool      `json:"mustChangePassword"`
+	ID                 int64     `json:"id"`
+	Email              string    `json:"email"`
+	Role               string    `json:"role"`
+	Active             bool      `json:"active"`
+	CreatedAt          time.Time `json:"createdAt"`
 }
 type contextKey string
 
@@ -152,16 +168,23 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 func ensureSuperadmin(ctx context.Context, db *sql.DB) error {
-	const email = "janon@lkprofessionals.com"
-	const passwordHash = "$2a$10$kBHVZlCmocrXwUFAy7B3leIkgjZkXJNmFSStd.vbtxZHPGE0FcZVG"
 	var exists bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE email=$1)`, email).Scan(&exists); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users)`).Scan(&exists); err != nil {
 		return err
 	}
 	if exists {
 		return nil
 	}
-	_, err := db.ExecContext(ctx, `INSERT INTO users(email,password_hash,role) VALUES($1,$2,'superadmin')`, email, passwordHash)
+	email := strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL")))
+	password := os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")
+	if email == "" || !strings.Contains(email, "@") || len(password) < 12 || len(password) > 72 {
+		return errors.New("first launch requires BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD (12–72 bytes)")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO users(email,password_hash,role,must_change_password) VALUES($1,$2,'superadmin',true) ON CONFLICT(email) DO NOTHING`, email, string(hash))
 	return err
 }
 func respond(w http.ResponseWriter, status int, v any) {
@@ -235,7 +258,31 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Choose a supported currency")
 		return
 	}
-	if _, err := s.db.ExecContext(r.Context(), `UPDATE store_settings SET currency=$1 WHERE id=1`, req.Currency); err != nil {
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		problem(w, 500, "Could not save settings")
+		return
+	}
+	defer tx.Rollback()
+	var old string
+	if tx.QueryRowContext(r.Context(), `SELECT currency FROM store_settings WHERE id=1 FOR UPDATE`).Scan(&old) != nil {
+		problem(w, 500, "Could not load settings")
+		return
+	}
+	var opened bool
+	if tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM register_sessions WHERE status='open')`).Scan(&opened) != nil {
+		problem(w, 500, "Could not check register")
+		return
+	}
+	if opened && old != req.Currency {
+		problem(w, 409, "Close the register before changing currency")
+		return
+	}
+	if auditActor(r.Context(), tx, principal(r)) != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
+	if _, err = tx.ExecContext(r.Context(), `UPDATE store_settings SET currency=$1 WHERE id=1`, req.Currency); err != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not save settings")
 		return
 	}
@@ -243,7 +290,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) products(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,category,price,cost,stock,reorder_level,art,color,COALESCE(category_id,0) FROM products WHERE active ORDER BY id`)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,category,price,cost,stock,reorder_level,art,color,COALESCE(category_id,0),sku,barcode,image_id FROM products WHERE active ORDER BY id`)
 	if err != nil {
 		problem(w, 500, "Could not load products")
 		return
@@ -252,38 +299,11 @@ func (s *Server) products(w http.ResponseWriter, r *http.Request) {
 	out := []Product{}
 	for rows.Next() {
 		var p Product
-		if rows.Scan(&p.ID, &p.Name, &p.Category, &p.Price, &p.Cost, &p.Stock, &p.ReorderLevel, &p.Art, &p.Color, &p.CategoryID) != nil {
+		if rows.Scan(&p.ID, &p.Name, &p.Category, &p.Price, &p.Cost, &p.Stock, &p.ReorderLevel, &p.Art, &p.Color, &p.CategoryID, &p.SKU, &p.Barcode, &p.ImageID) != nil {
 			problem(w, 500, "Could not read products")
 			return
 		}
 		out = append(out, p)
-	}
-	respond(w, 200, out)
-}
-func (s *Server) sales(w http.ResponseWriter, r *http.Request) {
-	var sessionID int64
-	if raw := r.URL.Query().Get("sessionId"); raw != "" {
-		var err error
-		sessionID, err = strconv.ParseInt(raw, 10, 64)
-		if err != nil || sessionID < 1 {
-			problem(w, 400, "Invalid session")
-			return
-		}
-	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT s.id,s.created_at,s.total,s.payment,string_agg(si.quantity||' × '||si.product_name,', ' ORDER BY si.id),s.session_id,COALESCE(s.created_by,0),COALESCE(s.cashier_email,'Not recorded') FROM sales s JOIN sale_items si ON si.sale_id=s.id WHERE s.deleted_at IS NULL AND ($1::bigint=0 OR s.session_id=$1) GROUP BY s.id ORDER BY s.id DESC LIMIT 100`, sessionID)
-	if err != nil {
-		problem(w, 500, "Could not load sales")
-		return
-	}
-	defer rows.Close()
-	out := []Sale{}
-	for rows.Next() {
-		var x Sale
-		if rows.Scan(&x.ID, &x.Created, &x.Total, &x.Payment, &x.Items, &x.SessionID, &x.CreatedBy, &x.CashierEmail) != nil {
-			problem(w, 500, "Could not read sales")
-			return
-		}
-		out = append(out, x)
 	}
 	respond(w, 200, out)
 }
@@ -293,6 +313,8 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		Payment       string `json:"payment"`
 		ExpectedTotal *int   `json:"expectedTotal"`
 		SessionID     *int64 `json:"sessionId"`
+		RequestID     string `json:"requestId"`
+		CashReceived  *int   `json:"cashReceived"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -303,18 +325,36 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	}
 	combined := make(map[int]int)
 	for _, line := range req.Items {
+		if line.ProductID < 1 || line.Quantity < 1 || line.Quantity > 100 {
+			problem(w, 400, "Invalid product or quantity")
+			return
+		}
 		combined[line.ProductID] += line.Quantity
 	}
 	req.Items = req.Items[:0]
 	for productID, quantity := range combined {
 		req.Items = append(req.Items, Line{ProductID: productID, Quantity: quantity})
 	}
+	sort.Slice(req.Items, func(i, j int) bool { return req.Items[i].ProductID < req.Items[j].ProductID })
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		problem(w, 500, "Could not start checkout")
 		return
 	}
 	defer tx.Rollback()
+	replay, requestHash, err := requestReplay(r.Context(), tx, req.RequestID, "checkout", principal(r).ID, req)
+	if err != nil {
+		problem(w, 409, err.Error())
+		return
+	}
+	if replay != nil {
+		respond(w, 200, replay)
+		return
+	}
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	session, err := s.lockedSession(r.Context(), tx)
 	if errors.Is(err, sql.ErrNoRows) {
 		problem(w, 409, "Open a register session before making a sale")
@@ -358,9 +398,21 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		problem(w, 409, "Prices have changed. Refresh the menu and review your order again.")
 		return
 	}
+	var change *int
+	if req.Payment == "cash" {
+		if req.CashReceived == nil || *req.CashReceived < total || *req.CashReceived > 2147483647 {
+			problem(w, 400, "Cash received must cover the total")
+			return
+		}
+		value := *req.CashReceived - total
+		change = &value
+	} else if req.CashReceived != nil {
+		problem(w, 400, "Cash received applies only to cash sales")
+		return
+	}
 	var id int64
 	created := time.Now()
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by,cashier_email) VALUES($1,$2,$3,$4,$5) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID, principal(r).Email).Scan(&id, &created); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by,cashier_email,currency,cash_received,change_due) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID, principal(r).Email, session.Currency, req.CashReceived, change).Scan(&id, &created); err != nil {
 		problem(w, 500, "Could not save sale")
 		return
 	}
@@ -379,11 +431,16 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		}
 		names = append(names, fmt.Sprintf("%d × %s", x.Quantity, x.Name))
 	}
+	result := Sale{ID: id, Created: created, Total: total, Payment: req.Payment, Items: strings.Join(names, ", "), SessionID: session.ID, CreatedBy: principal(r).ID, CashierEmail: principal(r).Email, Currency: session.Currency, CashReceived: req.CashReceived, ChangeDue: change}
+	if err = saveRequest(r.Context(), tx, req.RequestID, "checkout", requestHash, principal(r).ID, result); err != nil {
+		problem(w, 500, "Could not save checkout result")
+		return
+	}
 	if tx.Commit() != nil {
 		problem(w, 500, "Could not complete sale")
 		return
 	}
-	respond(w, 201, Sale{ID: id, Created: created, Total: total, Payment: req.Payment, Items: strings.Join(names, ", "), SessionID: session.ID, CreatedBy: principal(r).ID, CashierEmail: principal(r).Email})
+	respond(w, 201, result)
 }
 func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -412,13 +469,28 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasSuffix(r.URL.Path, "/open") {
+		tx, err := s.db.BeginTx(r.Context(), nil)
+		if err != nil {
+			problem(w, 500, "Could not open session")
+			return
+		}
+		defer tx.Rollback()
+		var currency string
+		if tx.QueryRowContext(r.Context(), `SELECT currency FROM store_settings WHERE id=1 FOR SHARE`).Scan(&currency) != nil {
+			problem(w, 500, "Could not load currency")
+			return
+		}
+		if auditActor(r.Context(), tx, principal(r)) != nil {
+			problem(w, 500, "Could not record actor")
+			return
+		}
 		var id int64
-		err := s.db.QueryRowContext(r.Context(), `INSERT INTO register_sessions(opening_cash,opened_by,opened_by_email) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id`, req.OpeningCash, principal(r).ID, principal(r).Email).Scan(&id)
+		err = tx.QueryRowContext(r.Context(), `INSERT INTO register_sessions(opening_cash,opened_by,opened_by_email,currency) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id`, req.OpeningCash, principal(r).ID, principal(r).Email, currency).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			problem(w, 409, "A register session is already open")
 			return
 		}
-		if err != nil {
+		if err != nil || tx.Commit() != nil {
 			problem(w, 500, "Could not open session")
 			return
 		}
@@ -431,6 +503,10 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	x, err := s.lockedSession(r.Context(), tx)
 	if err != nil {
 		problem(w, 409, "No register session is open")
@@ -449,7 +525,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		rows, err := s.db.QueryContext(r.Context(), `SELECT id,created_at,direction,amount,category,note,session_id FROM petty_cash_entries ORDER BY id DESC LIMIT 100`)
+		rows, err := s.db.QueryContext(r.Context(), `SELECT id,created_at,direction,amount,category,note,session_id,currency FROM petty_cash_entries ORDER BY id DESC LIMIT 100`)
 		if err != nil {
 			problem(w, 500, "Could not load petty cash")
 			return
@@ -459,12 +535,12 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var id, amount, session int64
 			var created time.Time
-			var direction, category, note string
-			if rows.Scan(&id, &created, &direction, &amount, &category, &note, &session) != nil {
+			var direction, category, note, currency string
+			if rows.Scan(&id, &created, &direction, &amount, &category, &note, &session, &currency) != nil {
 				problem(w, 500, "Could not read petty cash")
 				return
 			}
-			out = append(out, map[string]any{"id": id, "created": created, "direction": direction, "amount": amount, "category": category, "note": note, "sessionId": session})
+			out = append(out, map[string]any{"id": id, "created": created, "direction": direction, "amount": amount, "category": category, "note": note, "sessionId": session, "currency": currency})
 		}
 		respond(w, 200, out)
 		return
@@ -488,13 +564,17 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	x, err := s.lockedSession(r.Context(), tx)
 	if err != nil {
 		problem(w, 409, "Open a register session first")
 		return
 	}
 	var id int64
-	err = tx.QueryRowContext(r.Context(), `INSERT INTO petty_cash_entries(session_id,direction,amount,category,note,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, x.ID, req.Direction, req.Amount, req.Category, req.Note, principal(r).ID).Scan(&id)
+	err = tx.QueryRowContext(r.Context(), `INSERT INTO petty_cash_entries(session_id,direction,amount,category,note,created_by,currency) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, x.ID, req.Direction, req.Amount, req.Category, req.Note, principal(r).ID, x.Currency).Scan(&id)
 	if err != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not save entry")
 		return
@@ -503,7 +583,7 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		rows, err := s.db.QueryContext(r.Context(), `SELECT p.id,p.created_at,p.supplier,p.invoice_number,p.total,p.status,COALESCE(string_agg(pi.quantity||' × '||pr.name,', ' ORDER BY pi.id),'') FROM purchases p LEFT JOIN purchase_items pi ON pi.purchase_id=p.id LEFT JOIN products pr ON pr.id=pi.product_id GROUP BY p.id ORDER BY p.id DESC LIMIT 100`)
+		rows, err := s.db.QueryContext(r.Context(), `SELECT p.id,p.created_at,p.supplier,p.invoice_number,p.total,p.status,p.currency,COALESCE(string_agg(pi.quantity||' × '||pr.name,', ' ORDER BY pi.id),'') FROM purchases p LEFT JOIN purchase_items pi ON pi.purchase_id=p.id LEFT JOIN products pr ON pr.id=pi.product_id GROUP BY p.id ORDER BY p.id DESC LIMIT 100`)
 		if err != nil {
 			problem(w, 500, "Could not load purchases")
 			return
@@ -513,12 +593,12 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var id, total int64
 			var created time.Time
-			var supplier, invoice, status, items string
-			if rows.Scan(&id, &created, &supplier, &invoice, &total, &status, &items) != nil {
+			var supplier, invoice, status, currency, items string
+			if rows.Scan(&id, &created, &supplier, &invoice, &total, &status, &currency, &items) != nil {
 				problem(w, 500, "Could not read purchases")
 				return
 			}
-			out = append(out, map[string]any{"id": id, "created": created, "supplier": supplier, "invoiceNumber": invoice, "total": total, "status": status, "items": items})
+			out = append(out, map[string]any{"id": id, "created": created, "supplier": supplier, "invoiceNumber": invoice, "total": total, "status": status, "currency": currency, "items": items})
 		}
 		respond(w, 200, out)
 		return
@@ -541,6 +621,10 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	total := 0
 	for _, x := range req.Items {
 		if x.ProductID < 1 || x.Quantity < 1 || x.UnitCost < 0 {
@@ -618,6 +702,10 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	var stock int
 	if err = tx.QueryRowContext(r.Context(), `SELECT stock FROM products WHERE id=$1 AND active FOR UPDATE`, req.ProductID).Scan(&stock); err != nil {
 		problem(w, 404, "Product not found")
@@ -652,6 +740,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	if !s.loginAllowed(r, req.Email) {
+		w.Header().Set("Retry-After", "900")
+		problem(w, 429, "Too many sign-in attempts. Try again in 15 minutes.")
+		return
+	}
 	var id int64
 	var hash string
 	var active bool
@@ -660,6 +753,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusUnauthorized, "Invalid email or password")
 		return
 	}
+	_, _ = s.db.ExecContext(r.Context(), `DELETE FROM login_limits WHERE key=$1`, "email:"+tokenHash(strings.ToLower(strings.TrimSpace(req.Email))))
 	raw := make([]byte, 32)
 	if _, err = rand.Read(raw); err != nil {
 		problem(w, 500, "Could not create session")
@@ -686,7 +780,7 @@ func (s *Server) currentUser(r *http.Request) (*User, error) {
 		return nil, sql.ErrNoRows
 	}
 	var u User
-	err = s.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.role,u.active,u.created_at FROM auth_sessions a JOIN users u ON u.id=a.user_id WHERE a.token_hash=$1 AND a.expires_at>now() AND u.active`, tokenHash(c.Value)).Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.CreatedAt)
+	err = s.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.role,u.active,u.created_at,u.must_change_password FROM auth_sessions a JOIN users u ON u.id=a.user_id WHERE a.token_hash=$1 AND a.expires_at>now() AND u.active`, tokenHash(c.Value)).Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.CreatedAt, &u.MustChangePassword)
 	if err != nil {
 		return nil, err
 	}
@@ -705,6 +799,10 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 				}
 				http.Redirect(w, r, destination, http.StatusSeeOther)
 			}
+			return
+		}
+		if u.MustChangePassword && r.Method != "GET" && r.Method != "HEAD" && r.URL.Path != "/api/auth/password" {
+			problem(w, 403, "Change your temporary password in Account before continuing")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, u)))
@@ -778,7 +876,7 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var u User
-	err = s.db.QueryRowContext(r.Context(), `INSERT INTO users(email,password_hash,role) VALUES($1,$2,$3) ON CONFLICT(email) DO NOTHING RETURNING id,email,role,active,created_at`, req.Email, string(hash), req.Role).Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.CreatedAt)
+	err = s.db.QueryRowContext(r.Context(), `INSERT INTO users(email,password_hash,role,must_change_password) VALUES($1,$2,$3,true) ON CONFLICT(email) DO NOTHING RETURNING id,email,role,active,created_at`, req.Email, string(hash), req.Role).Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		problem(w, 409, "A user with this email already exists")
 		return
@@ -815,6 +913,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	if req.Role != "" {
 		if !hasRole(req.Role, "superadmin", "admin", "cashier") {
 			problem(w, 400, "Invalid role")
@@ -844,11 +946,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, "Could not secure password")
 			return
 		}
-		if _, err = tx.ExecContext(r.Context(), `UPDATE users SET password_hash=$1 WHERE id=$2`, string(hash), id); err != nil {
+		if _, err = tx.ExecContext(r.Context(), `UPDATE users SET password_hash=$1,must_change_password=true WHERE id=$2`, string(hash), id); err != nil {
 			problem(w, 500, "Could not update password")
 			return
 		}
-		_, _ = tx.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE user_id=$1 AND user_id<>$2`, id, actor.ID)
+		_, _ = tx.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE user_id=$1`, id)
 	}
 	result, err := tx.ExecContext(r.Context(), `UPDATE users SET email=email WHERE id=$1`, id)
 	if err != nil {
@@ -869,6 +971,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() http.Handler {
 	private := http.NewServeMux()
 	private.HandleFunc("GET /api/auth/me", s.me)
+	s.operationRoutes(private)
 	private.Handle("GET /api/settings", requireRoles(s.settings, "superadmin", "admin", "cashier"))
 	private.Handle("PUT /api/settings", requireRoles(s.updateSettings, "superadmin", "admin"))
 	private.Handle("GET /api/categories", requireRoles(s.categories, "superadmin", "admin", "cashier"))
@@ -897,7 +1000,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
-	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings"} {
+	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings", "/reports", "/audit", "/account"} {
 		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, sub, "index.html")
 		})

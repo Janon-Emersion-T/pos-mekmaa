@@ -38,7 +38,7 @@
         >
           Workspace
         </p>
-        <nav class="space-y-1 px-4">
+        <nav class="space-y-1 overflow-y-auto px-4">
           <a href="/pos" class="nav-item active" data-page="pos">
             <span data-icon="grid"></span>Point of sale</a><a href="/session" class="nav-item" data-page="session">
             <span data-icon="cash"></span>Register session</a><a href="/sales" class="nav-item" data-page="sales">
@@ -57,6 +57,9 @@
             <span data-icon="user"></span>Staff users
           </a>
         <a href="/products" class="nav-item hidden" data-page="products" data-roles="superadmin admin"><span data-icon="box"></span>Products</a>
+        <a href="/reports" class="nav-item hidden" data-page="reports" data-roles="superadmin admin">Daily report</a>
+        <a href="/audit" class="nav-item hidden" data-page="audit" data-roles="superadmin">Audit history</a>
+        <a href="/account" class="nav-item" data-page="account">Account</a>
         <a href="/settings" class="nav-item hidden" data-page="settings" data-roles="superadmin admin"><span data-icon="settings"></span>Settings</a>
         </nav>
         <div class="mt-auto p-5">
@@ -129,6 +132,9 @@
             Staff
           </a>
         <a href="/products" class="category hidden" data-page="products" data-roles="superadmin admin">Products</a>
+        <a href="/reports" class="category hidden" data-page="reports" data-roles="superadmin admin">Daily report</a>
+        <a href="/audit" class="category hidden" data-page="audit" data-roles="superadmin">Audit history</a>
+        <a href="/account" class="category" data-page="account">Account</a>
         <a href="/settings" class="category hidden" data-page="settings" data-roles="superadmin admin">Settings</a>
         </nav>
         <div id="pos-page" class="flex flex-col xl:flex-row">
@@ -320,6 +326,14 @@
         </div>
       </form>
     </dialog>
+    <dialog id="refund-dialog" aria-labelledby="refund-title" class="w-full max-w-xl rounded-2xl p-6 shadow-2xl backdrop:bg-black/30">
+      <form id="refund-form"><h2 id="refund-title" class="text-xl font-semibold">Record a refund</h2>
+        <div id="refund-content" class="mt-4"></div>
+        <p id="refund-error" role="alert" class="mt-3 text-sm text-red-600"></p>
+        <div class="mt-5 flex gap-3"><button id="refund-cancel" type="button" class="flex-1 rounded-lg border px-4 py-3 text-sm">Cancel</button><button id="refund-submit" class="flex-1 rounded-lg bg-ink px-4 py-3 text-sm text-white disabled:opacity-50">Record refund</button></div>
+      </form>
+    </dialog>
     <script src="/app.js"></script>
+    <script src="/operations.js"></script>
   </body>
 </html>

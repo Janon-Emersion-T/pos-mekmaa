@@ -67,6 +67,10 @@ func (s *Server) saveCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	var id int64
 	status := http.StatusCreated
 	if r.Method == http.MethodPost {
@@ -110,6 +114,10 @@ func (s *Server) deleteCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	var lockedID int64
 	err = tx.QueryRowContext(r.Context(), `SELECT id FROM categories WHERE id=$1 FOR UPDATE`, id).Scan(&lockedID)
 	if errors.Is(err, sql.ErrNoRows) {

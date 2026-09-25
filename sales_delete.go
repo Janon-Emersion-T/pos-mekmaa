@@ -32,6 +32,10 @@ func (s *Server) deleteSale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	var sessionID int64
 	if err = tx.QueryRowContext(r.Context(), `SELECT session_id FROM sales WHERE id=$1`, id).Scan(&sessionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -53,6 +57,15 @@ func (s *Server) deleteSale(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		problem(w, 500, "Could not load sale")
+		return
+	}
+	var hasRefunds bool
+	if tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM refunds WHERE sale_id=$1)`, id).Scan(&hasRefunds) != nil {
+		problem(w, 500, "Could not check refunds")
+		return
+	}
+	if hasRefunds {
+		problem(w, 409, "Refunded sales cannot be deleted; keep their refund trail")
 		return
 	}
 	if deleted.Valid {

@@ -9,7 +9,8 @@ function applySettings(value) {
     minimumFractionDigits: 2, maximumFractionDigits: 2,
   });
 }
-const money = (n) => moneyFormatter ? moneyFormatter.format(n / 100) : "—";
+const money = (n, currency = settings.currency) => moneyFormatter ? new Intl.NumberFormat("en-US", {style:"currency",currency,minimumFractionDigits:2,maximumFractionDigits:2}).format(n/100) : "—";
+let pendingCheckout = null;
 const icons = {
   settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/><circle cx="12" cy="12" r="8"/>',
   logo: '<path d="M5 7h14v10H5zM8 4v3m8-3v3M8 11h8m-8 3h4"/>',
@@ -37,9 +38,13 @@ document
   .querySelectorAll("[data-icon]")
   .forEach((el) => (el.innerHTML = icon(el.dataset.icon)));
 function art(p) {
+  if (p.imageId) return `<img src="/api/product-images/${p.imageId}" alt="${escapeHTML(p.name)}" class="h-full w-full object-contain" loading="lazy">`;
+  if (p.art === "none") return "";
   let shape = "";
   if (p.art === "box")
     shape = '<path d="M45 60l55-25 55 25v65l-55 25-55-25zM45 60l55 25 55-25M100 85v65" fill="#fff" stroke="#777" stroke-width="4"/>';
+  else if (p.art === "bottle")
+    shape = '<path d="M86 43h28v25l12 17v55q-26 12-52 0V85l12-17z" fill="#fff" stroke="#777" stroke-width="4"/><rect x="84" y="32" width="32" height="13" rx="3" fill="#777"/><path d="M76 96h48v29H76z" fill="#d8e8cf"/>';
   else if (p.art === "coffee")
     shape =
       '<ellipse cx="100" cy="132" rx="61" ry="17" fill="#fbf7ee"/><ellipse cx="100" cy="131" rx="45" ry="10" fill="#ddd7ca"/><path d="M139 75c34-9 34 35 4 34" fill="none" stroke="#fffdf7" stroke-width="12"/><path d="M51 69h95l-9 51c-4 20-70 20-76 0z" fill="#fcfaf4"/><ellipse cx="99" cy="70" rx="48" ry="19" fill="#fffdf7"/><ellipse cx="99" cy="71" rx="41" ry="14" fill="#ad6e3d"/><path d="M98 82c-33-7-26-21-11-17l11 8 11-8c17-4 22 10-11 17" fill="#f4e8cb"/><path d="M100 82V66" stroke="#ad6e3d" stroke-width="2"/>';
@@ -85,12 +90,12 @@ let pageRequest = 0;
 const pageTitles = {
   pos: "Point of sale", products: "Products", session: "Register session",
   sales: "Sales history", inventory: "Inventory", purchases: "Purchases",
-  petty: "Petty cash", users: "Staff users", settings: "Settings",
+  petty: "Petty cash", users: "Staff users", settings: "Settings", reports: "Daily report", audit: "Audit history", account: "Account",
 };
 function canVisit(next) {
   if (!Object.hasOwn(pageTitles, next)) return false;
-  if (next === "users") return currentUser?.role === "superadmin";
-  return !["products","inventory","purchases","settings"].includes(next) ||
+  if (next === "users" || next === "audit") return currentUser?.role === "superadmin";
+  return !["products","inventory","purchases","settings","reports"].includes(next) ||
     ["admin","superadmin"].includes(currentUser?.role);
 }
 function pageFromURL() {
@@ -104,7 +109,7 @@ async function api(path, options) {
     throw Error("Please sign in again");
   }
   const data = await r.json();
-  if (!r.ok) throw Error(data.error || "Something went wrong");
+  if (!r.ok) { const error = Error(data.error || "Something went wrong"); error.status=r.status; throw error; }
   return data;
 }
 let toastTimer;
@@ -121,7 +126,7 @@ function renderProducts() {
   const filtered = products.filter(
     (p) =>
       (category === "" || p.category === category) &&
-      p.name.toLowerCase().includes(term),
+      (p.name.toLowerCase().includes(term) || p.sku?.toLowerCase().includes(term) || p.barcode?.includes(term)),
   );
   $("#categories").innerHTML = [["", "grid"], ...categories.map((name) => [name, "box"])]
     .map(
@@ -161,7 +166,8 @@ function renderCart() {
   $("#cart-count").textContent = `(${count})`;
   $("#subtotal").textContent = $("#total").textContent = money(total);
   $("#tax").textContent = money(0);
-  $("#checkout").disabled = !count || busy || !moneyFormatter || !session;
+  $("#checkout").disabled = busy || !moneyFormatter || (!pendingCheckout && (!count || !session)) || Boolean(currentUser?.mustChangePassword);
+  $("#checkout").querySelector("span").textContent = pendingCheckout ? "Recover pending sale" : "Complete order";
   for (const [openClass, closedClass] of [["border-green-100","border-gray-200"],["bg-green-50","bg-gray-50"],["text-green-700","text-gray-500"]]) {
     $("#register-badge").classList.toggle(openClass, Boolean(session));
     $("#register-badge").classList.toggle(closedClass, !session);
@@ -172,9 +178,10 @@ function renderCart() {
   $("#session-notice").innerHTML = session
     ? `<p class="font-medium">Session #${session.id} · ${escapeHTML(currentUser?.email || "")}</p><p>Opened by ${escapeHTML(session.openedByEmail)} · ${new Date(session.openedAt).toLocaleString()}</p>`
     : '<p class="font-medium">Open a register session to complete a sale.</p><a href="/session" data-page="session" class="text-orange-600">Open register →</a>';
+  if (pendingCheckout) $("#session-notice").innerHTML = '<p class="font-medium">A checkout is awaiting confirmation.</p><p>Recover it before starting another sale. Retrying will not duplicate the sale.</p>';
 }
 function add(id, delta = 1) {
-  if (busy) return;
+  if (busy || pendingCheckout) return;
   const p = products.find((p) => p.id === id),
     qty = (cart.get(id) || 0) + delta;
   if (!p) return;
@@ -220,7 +227,7 @@ function restoreProductDraft(draft) {
   if (!form || !draft) return;
   for (const [name,value] of Object.entries(draft)) {
     const field = form.elements.namedItem(name);
-    if (field) field.value = value;
+    if (field && field.type !== "file") field.value = value;
   }
 }
 async function refreshCategories(draft) {
@@ -231,9 +238,15 @@ async function refreshCategories(draft) {
 function productManagement() {
   const p = products.find((p) => p.id === editingProduct);
   const appearances = ["box","bottle","none"];
+  if (p?.art && !appearances.includes(p.art)) appearances.push(p.art);
   return categoryManagement() + `<form data-form="product" data-id="${p?.id || ""}" class="mb-6 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3">
     <h2 class="font-semibold sm:col-span-3">${p ? "Edit product" : "Add product"}</h2>
     ${field("Product name", "name", "text", p?.name || "")}
+    <label class="text-xs font-medium text-gray-600">SKU<input name="sku" maxlength="64" value="${escapeHTML(p?.sku || "")}" class="mt-2 h-11 w-full rounded-lg border px-3"></label>
+    <label class="text-xs font-medium text-gray-600">Barcode<input name="barcode" maxlength="64" value="${escapeHTML(p?.barcode || "")}" class="mt-2 h-11 w-full rounded-lg border px-3"></label>
+    <label class="text-xs font-medium text-gray-600">Product image (JPEG/PNG, up to 2 MB)<input name="image" type="file" accept="image/jpeg,image/png" class="mt-2 block w-full text-xs"></label>
+    <input name="imageId" type="hidden" value="${p?.imageId || ""}">
+    ${p?.imageId ? '<label class="text-xs"><input type="checkbox" name="removeImage"> Remove current image</label>' : ""}
     <label class="block text-xs font-medium text-gray-600">Category<select name="categoryId" required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3"><option value="">${productCategories.length ? "Select category" : "Create a category above first"}</option>${productCategories.map((c) => `<option value="${c.id}" ${p?.categoryId === c.id ? "selected" : ""}>${escapeHTML(c.name)}</option>`).join("")}</select></label>
     ${amountField("Selling price", "price", p ? (p.price / 100).toFixed(2) : "")}
     ${amountField("Cost", "cost", p ? (p.cost / 100).toFixed(2) : "0.00")}
@@ -243,6 +256,8 @@ function productManagement() {
     ${field("Background color", "color", "color", p?.color || "#eeeeee")}
     <div class="flex items-center gap-3"><button class="rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">${p ? "Save changes" : "Add product"}</button>${p ? '<button type="button" data-cancel-product class="text-sm text-gray-500">Cancel</button>' : ""}</div>
   </form>
+  <div class="mb-4 rounded-xl border bg-white p-4"><a href="/api/products/export" class="mr-3 text-sm text-orange-600">Export products CSV</a><a href="/product-import-template.csv" download class="text-sm text-orange-600">Download import template</a><label class="mt-3 block text-xs text-gray-600">Import new products (max 1000 rows / 1 MB)<input id="product-import" type="file" accept=".csv,text/csv" class="mt-2 block"></label><p class="mt-2 text-xs text-gray-500">Creates new products and categories. Duplicate SKUs or barcodes cancel the entire import.</p></div>
+  <div class="mb-4 rounded-lg bg-orange-50 p-3 text-sm">${products.filter(p=>p.stock<=p.reorderLevel).length} products at or below reorder level. <a href="/inventory" data-page="inventory" class="text-orange-600">Review inventory →</a></div>
   <div class="mb-4 flex items-center justify-between"><h2 class="font-semibold">Products (${products.length})</h2><button data-delete-all class="rounded-lg border px-4 py-2 text-xs text-red-600 disabled:opacity-50" ${products.length ? "" : "disabled"}>Delete all products</button></div>
   ${table(["Product","Category","Price","Cost","Stock","Actions"], products.map((p) => `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(p.name)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${money(p.price)}</td><td class="p-4">${money(p.cost)}</td><td class="p-4">${p.stock}</td><td class="p-4"><button data-edit-product="${p.id}" class="mr-3 text-orange-600">Edit</button><button data-delete-product="${p.id}" class="text-red-600">Delete</button></td></tr>`).join(""))}
   <p class="mt-3 text-xs text-gray-500">Deleted products are removed from the catalog. Past sales, purchases, and stock records are kept.</p>`;
@@ -261,7 +276,7 @@ function renderOther() {
     desc = "Manage preferences for this store.";
     body = `<form data-form="settings" class="max-w-md rounded-xl border bg-white p-5">
       <h2 class="font-semibold">Store currency</h2>
-      <p class="mt-2 text-xs leading-5 text-gray-500">Used for prices, checkout, receipts, and all history. Changing currency keeps existing amounts the same; no exchange-rate conversion is applied.</p>
+      <p class="mt-2 text-xs leading-5 text-gray-500">Used for new prices and transactions. Existing sales keep their recorded currency. Close the register before changing currency. Product prices are not converted.</p>
       <label class="mt-5 block text-xs font-medium text-gray-600">Currency
         <select name="currency" required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3">
           ${settings.currencies.map((c) => `<option value="${c.code}" ${c.code === settings.currency ? "selected" : ""}>${c.code} — ${c.name}</option>`).join("")}
@@ -286,19 +301,17 @@ function renderOther() {
           .join(""),
       );
   } else if (page === "sales") {
-    title = "Sales history";
-    const filterSession = new URLSearchParams(location.search).get("sessionId");
-    desc = filterSession ? `Sales for session #${escapeHTML(filterSession)}. Showing up to 100 recent sales.` : "Track the staff member and register session for each sale. Showing up to 100 recent sales.";
-    body = table(
-      ["Order", "Date", "Cashier", "Session", "Items", "Payment", "Total", ...(currentUser.role === "superadmin" ? ["Action"] : [])],
-      sales
-        .map(
-          (s) =>
-            `<tr class="border-b"><td class="p-4 font-semibold">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${escapeHTML(s.cashierEmail)}<span class="block text-[10px] text-gray-400">${s.createdBy ? "Staff #" + s.createdBy : ""}</span></td><td class="p-4"><a href="/sales?sessionId=${s.sessionId}" data-page="sales" class="text-orange-600">#${s.sessionId}</a></td><td class="p-4">${escapeHTML(s.items)}</td><td class="p-4 capitalize">${s.payment}</td><td class="p-4 font-semibold">${money(s.total)}</td>${currentUser.role === "superadmin" ? `<td class="p-4"><button data-delete-sale="${s.id}" class="rounded-lg border border-red-200 px-3 py-2 text-xs text-red-600 disabled:opacity-50" aria-label="Delete sale #${s.id}">Delete sale</button></td>` : ""}</tr>`,
-        )
-        .join(""),
-    );
-    if (filterSession) body = '<a href="/sales" data-page="sales" class="mb-4 block text-sm text-orange-600">← All sales</a>' + body;
+    title = "Sales history"; desc = "Search sales, reprint receipts, and track returns.";
+    body = salesHistoryView();
+  } else if (page === "reports") {
+    title = "Daily closing report"; desc = "Sales, refunds, cash movements, and register differences by currency.";
+    body = dailyReportView();
+  } else if (page === "audit") {
+    title = "Audit history"; desc = "Staff actions and before/after changes. Only superadmins can access this history.";
+    body = auditView();
+  } else if (page === "account") {
+    title = "Account"; desc = "Change your password and sign out other sessions.";
+    body = accountView();
   } else if (page === "session") {
     title = "Register session";
     desc =
@@ -308,8 +321,8 @@ function renderOther() {
           ["Session", "#" + session.id],
           ["Opened by", escapeHTML(session.openedByEmail)],
           ["Opened", new Date(session.openedAt).toLocaleString()],
-          ["Opening cash", money(session.openingCash)],
-          ["Expected cash", money(session.expectedCash)],
+          ["Opening cash", money(session.openingCash, session.currency)],
+          ["Expected cash", money(session.expectedCash, session.currency)],
         ]
           .map(
             (x) =>
@@ -321,7 +334,7 @@ function renderOther() {
       : `<form data-form="open-session" class="max-w-md rounded-xl border bg-white p-5">${amountField("Opening cash", "openingCash", "0.00")}<button class="mt-4 rounded-lg bg-accent px-5 py-3 text-sm text-white">Open register session</button></form>`;
     body += '<h2 class="mb-3 mt-7 font-semibold">Session history</h2><p class="mb-4 text-xs text-gray-500">Latest 100 sessions. Expected cash at close is preserved even if a sale is later deleted.</p>' + table(
       ["Session", "Opened by", "Opened", "Closed by", "Closed", "Status", "Sales", "Sales total", "Expected at close", "Counted cash", "Difference"],
-      sessionHistory.map((x) => `<tr class="border-b"><td class="p-4"><a href="/sales?sessionId=${x.id}" data-page="sales" class="text-orange-600">#${x.id}</a></td><td class="p-4">${escapeHTML(x.openedByEmail)}</td><td class="p-4">${new Date(x.openedAt).toLocaleString()}</td><td class="p-4">${x.closedAt ? escapeHTML(x.closedByEmail) : "—"}</td><td class="p-4">${x.closedAt ? new Date(x.closedAt).toLocaleString() : "—"}</td><td class="p-4 capitalize">${x.status}</td><td class="p-4">${x.saleCount}</td><td class="p-4">${money(x.salesTotal)}</td><td class="p-4">${x.closingExpectedCash == null ? (x.closedAt ? "Not recorded" : "—") : money(x.closingExpectedCash)}</td><td class="p-4">${x.closingCash == null ? "—" : money(x.closingCash)}</td><td class="p-4">${x.closingExpectedCash == null || x.closingCash == null ? "—" : money(x.closingCash - x.closingExpectedCash)}</td></tr>`).join("")
+      sessionHistory.map((x) => `<tr class="border-b"><td class="p-4"><a href="/sales?sessionId=${x.id}" data-page="sales" class="text-orange-600">#${x.id}</a></td><td class="p-4">${escapeHTML(x.openedByEmail)}</td><td class="p-4">${new Date(x.openedAt).toLocaleString()}</td><td class="p-4">${x.closedAt ? escapeHTML(x.closedByEmail) : "—"}</td><td class="p-4">${x.closedAt ? new Date(x.closedAt).toLocaleString() : "—"}</td><td class="p-4 capitalize">${x.status}</td><td class="p-4">${x.saleCount}</td><td class="p-4">${money(x.salesTotal, x.currency)}</td><td class="p-4">${x.closingExpectedCash == null ? (x.closedAt ? "Not recorded" : "—") : money(x.closingExpectedCash, x.currency)}</td><td class="p-4">${x.closingCash == null ? "—" : money(x.closingCash, x.currency)}</td><td class="p-4">${x.closingExpectedCash == null || x.closingCash == null ? "—" : money(x.closingCash - x.closingExpectedCash, x.currency)}</td></tr>`).join("")
     );
   } else if (page === "inventory") {
     title = "Inventory";
@@ -333,7 +346,7 @@ function renderOther() {
         products
           .map(
             (p) =>
-              `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(p.name)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${money(p.cost)}</td><td class="p-4">${money(p.price)}</td><td class="p-4 font-semibold">${p.stock}</td><td class="p-4">${p.reorderLevel}</td></tr>`,
+              `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(p.name)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${money(p.cost)}</td><td class="p-4">${money(p.price)}</td><td class="p-4 font-semibold ${p.stock<=p.reorderLevel ? "text-red-600" : ""}">${p.stock}${p.stock<=p.reorderLevel ? " · Low stock" : ""}</td><td class="p-4">${p.reorderLevel}</td></tr>`,
           )
           .join(""),
       ) +
@@ -358,7 +371,7 @@ function renderOther() {
         purchases
           .map(
             (p) =>
-              `<tr class="border-b"><td class="p-4 font-semibold">#${p.id}</td><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4">${escapeHTML(p.supplier)}</td><td class="p-4">${escapeHTML(p.invoiceNumber || "—")}</td><td class="p-4">${escapeHTML(p.items)}</td><td class="p-4 font-semibold">${money(p.total)}</td></tr>`,
+              `<tr class="border-b"><td class="p-4 font-semibold">#${p.id}</td><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4">${escapeHTML(p.supplier)}</td><td class="p-4">${escapeHTML(p.invoiceNumber || "—")}</td><td class="p-4">${escapeHTML(p.items)}</td><td class="p-4 font-semibold">${money(p.total, p.currency)}</td></tr>`,
           )
           .join(""),
       );
@@ -372,7 +385,7 @@ function renderOther() {
         petty
           .map(
             (p) =>
-              `<tr class="border-b"><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4 capitalize">${escapeHTML(p.direction)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${escapeHTML(p.note)}</td><td class="p-4 font-semibold ${p.direction === "in" ? "text-green-600" : "text-red-500"}">${p.direction === "in" ? "+" : "−"}${money(p.amount)}</td></tr>`,
+              `<tr class="border-b"><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4 capitalize">${escapeHTML(p.direction)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${escapeHTML(p.note)}</td><td class="p-4 font-semibold ${p.direction === "in" ? "text-green-600" : "text-red-500"}">${p.direction === "in" ? "+" : "−"}${money(p.amount, p.currency)}</td></tr>`,
           )
           .join(""),
       );
@@ -387,7 +400,7 @@ function renderOther() {
 async function loadPage() {
   const request = ++pageRequest, requestedPage = page;
   try {
-    const endpoints = { session: "/api/sessions", sales: "/api/sales" + location.search, inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
+    const endpoints = { reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
     const [savedSettings, savedProducts, savedSession, records, savedCategories] = await Promise.all([
       api("/api/settings"), api("/api/products"), api("/api/session"),
       endpoints[requestedPage] ? api(endpoints[requestedPage]) : Promise.resolve(null),
@@ -399,6 +412,8 @@ async function loadPage() {
     productCategories = savedCategories;
     session = savedSession;
     if (requestedPage === "sales") sales = records;
+    if (requestedPage === "reports") reportData = records;
+    if (requestedPage === "audit") auditData = records;
     if (requestedPage === "session") sessionHistory = records;
     if (requestedPage === "inventory") movements = records;
     if (requestedPage === "purchases") purchases = records;
@@ -415,6 +430,7 @@ async function loadPage() {
 }
 async function navigate(next, push = true, query = "") {
   if (!currentUser) return;
+  if (currentUser.mustChangePassword) { next="account"; query=""; }
   if (!canVisit(next)) { next = "pos"; push = false; query = ""; }
   page = next;
   const path = "/" + page + query;
@@ -489,7 +505,7 @@ document.addEventListener("click", async (e) => {
       const confirmation = await confirmAction({
         title: `Delete sale #${sale.id}?`,
         description: "This removes the sale from history, restores its stock, and reverses its cash contribution to the original register session. An audit record is kept. No payment refund is issued.",
-        details: `<p class="text-xs text-gray-500">${new Date(sale.created).toLocaleString()}</p><p class="mt-3">${escapeHTML(sale.items)}</p><div class="mt-4 flex justify-between border-t pt-4"><span class="capitalize">${sale.payment}</span><strong>${money(sale.total)}</strong></div>`,
+        details: `<p class="text-xs text-gray-500">${new Date(sale.created).toLocaleString()}</p><p class="mt-3">${escapeHTML(sale.items)}</p><div class="mt-4 flex justify-between border-t pt-4"><span class="capitalize">${sale.payment}</span><strong>${money(sale.total, sale.currency)}</strong></div>`,
         label: "Delete sale", deletion: true,
       });
       if (!confirmation) return;
@@ -573,7 +589,7 @@ document.addEventListener("click", async (e) => {
       toast(err.message);
     }
   }
-  if (pay) {
+  if (pay && !busy && !pendingCheckout) {
     payment = pay.dataset.payment;
     document.querySelectorAll(".payment").forEach((el) => {
       el.classList.toggle("border-orange-300", el.dataset.payment === payment);
@@ -593,7 +609,7 @@ document.addEventListener("keydown", (e) => {
   }
 });
 $("#clear").onclick = () => {
-  if (!busy) {
+  if (!busy && !pendingCheckout) {
     cart.clear();
     renderCart();
   }
@@ -610,63 +626,6 @@ $("#clear").onclick = () => {
       });
     }),
 );
-$("#checkout").onclick = async () => {
-  if (busy || !cart.size || !session) return;
-  busy = true;
-  renderCart();
-  try {
-    const checkoutSession = session.id;
-    const total = [...cart].reduce((sum, [id, quantity]) => sum + products.find((p) => p.id === id).price * quantity, 0);
-    const confirmation = await confirmAction({
-      title: "Complete this order?",
-      description: `Session #${checkoutSession} · Cashier: ${currentUser.email}. Review the order and confirm that payment has been received.`,
-      details: `<div class="space-y-3">${[...cart].map(([id, quantity]) => {
-        const p = products.find((p) => p.id === id);
-        return `<div class="flex justify-between gap-3"><span>${quantity} × ${escapeHTML(p.name)}</span><span class="shrink-0">${money(p.price * quantity)}</span></div>`;
-      }).join("")}</div><div class="mt-4 flex justify-between border-t pt-4"><span class="capitalize">${payment} · ${service}</span><strong>${money(total)}</strong></div>`,
-      label: "Confirm sale",
-    });
-    if (!confirmation) return;
-    const sale = await api("/api/checkout", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        items: [...cart].map(([productId, quantity]) => ({
-          productId,
-          quantity,
-        })),
-        payment,
-        expectedTotal: total,
-        sessionId: checkoutSession,
-      }),
-    });
-    $("#receipt").innerHTML =
-      `<div class="text-center"><div class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-50 text-xl text-green-600">✓</div><h2 class="text-xl font-semibold">Order complete!</h2><p class="mt-2 text-xs text-gray-400">The Daily Grind · ${service}</p><p class="mt-1 text-xs text-gray-400">Order #${String(sale.id).padStart(4, "0")} · ${new Date(sale.created).toLocaleString()}</p><p class="mt-2 text-xs text-gray-500">Session #${sale.sessionId} · Cashier: ${escapeHTML(sale.cashierEmail)}</p></div><div class="my-6 border-y border-dashed py-5 text-sm leading-7">${[
-        ...cart,
-      ]
-        .map(([id, q]) => {
-          const p = products.find((p) => p.id === id);
-          return `<div class="flex justify-between"><span>${q} × ${escapeHTML(p.name)}</span><span>${money(q * p.price)}</span></div>`;
-        })
-        .join(
-          "",
-        )}</div><div class="flex justify-between font-semibold"><span>Total</span><span>${money(sale.total)}</span></div><p class="mt-3 text-xs capitalize text-gray-400">Payment recorded: ${sale.payment}</p><p class="mt-6 text-center text-xs text-gray-400">Thanks for stopping by. See you again soon!</p>`;
-    cart.clear();
-    $("#receipt-dialog").showModal();
-    try {
-      products = await api("/api/products");
-      renderProducts();
-    } catch (e) {
-      toast("Sale saved. Reload to refresh inventory.");
-    }
-  } catch (e) {
-    toast(e.message);
-  } finally {
-    try { session = await api("/api/session"); } catch { session = null; }
-    busy = false;
-    renderCart();
-  }
-};
 $("#close-receipt").onclick = () => $("#receipt-dialog").close();
 $("#print").onclick = () => window.print();
 $("#date").textContent = new Date().toLocaleDateString("en-US", {
@@ -684,6 +643,7 @@ $("#other-page").addEventListener("submit", async (e) => {
   const f = e.target,
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
+  if (["sale-filter","report-filter","audit-filter","password"].includes(kind)) return;
   if (f.dataset.saving) return;
   f.dataset.saving = "true";
   const submit = f.querySelector('button:not([type="button"])');
@@ -703,11 +663,16 @@ $("#other-page").addEventListener("submit", async (e) => {
       return;
     }
     if (kind === "product") {
+      let imageId = data.removeImage ? null : (data.imageId ? Number(data.imageId) : null);
+      if (data.image?.size) {
+        const uploaded = await api("/api/product-images", {method:"POST",body:data.image});
+        imageId = uploaded.id;
+      }
       await api(f.dataset.id ? `/api/products/${f.dataset.id}` : "/api/products", {
         method: f.dataset.id ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: data.name, categoryId: Number(data.categoryId),
+          name: data.name, categoryId: Number(data.categoryId), sku:data.sku, barcode:data.barcode, imageId,
           price: minorUnits(data.price), cost: minorUnits(data.cost),
           stock: f.dataset.id ? 0 : Number(data.stock),
           reorderLevel: Number(data.reorderLevel), art: data.art, color: data.color,
@@ -823,6 +788,7 @@ $("#other-page").addEventListener("submit", async (e) => {
     ]);
     [products, session, currentUser] = loaded;
     applySettings(loaded[3]);
+    restorePendingCheckout();
     renderCart();
     document.querySelectorAll("[data-roles]").forEach((el) => {
       el.classList.toggle(

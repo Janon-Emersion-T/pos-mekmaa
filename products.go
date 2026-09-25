@@ -12,6 +12,9 @@ import (
 var productColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 type productInput struct {
+	SKU          string `json:"sku"`
+	Barcode      string `json:"barcode"`
+	ImageID      *int64 `json:"imageId"`
 	Name         string `json:"name"`
 	Category     string `json:"category"`
 	CategoryID   int64  `json:"categoryId"`
@@ -24,6 +27,8 @@ type productInput struct {
 }
 
 func (p *productInput) validate() bool {
+	p.SKU = strings.TrimSpace(p.SKU)
+	p.Barcode = strings.TrimSpace(p.Barcode)
 	p.Name = strings.TrimSpace(p.Name)
 	p.Category = strings.TrimSpace(p.Category)
 	if p.Art == "" {
@@ -33,12 +38,12 @@ func (p *productInput) validate() bool {
 		p.Color = "#eeeeee"
 	}
 	artOK := false
-	for _, art := range []string{"box", "coffee", "iced", "matcha", "tea", "croissant", "cookie", "toast", "sandwich", "cake", "roll"} {
+	for _, art := range []string{"box", "bottle", "none", "coffee", "iced", "matcha", "tea", "croissant", "cookie", "toast", "sandwich", "cake", "roll"} {
 		if p.Art == art {
 			artOK = true
 		}
 	}
-	return p.Name != "" && len(p.Name) <= 200 && (p.CategoryID > 0 || (p.Category != "" && len(p.Category) <= 100)) && p.CategoryID >= 0 &&
+	return len(p.SKU) <= 64 && len(p.Barcode) <= 64 && !strings.ContainsAny(p.SKU+p.Barcode, "\r\n\t") && (p.ImageID == nil || *p.ImageID > 0) && p.Name != "" && len(p.Name) <= 200 && (p.CategoryID > 0 || (p.Category != "" && len(p.Category) <= 100)) && p.CategoryID >= 0 &&
 		p.Price >= 0 && p.Price <= 10000000 && p.Cost >= 0 && p.Cost <= 10000000 &&
 		p.Stock >= 0 && p.Stock <= 1000000 && p.ReorderLevel >= 0 && p.ReorderLevel <= 1000000 &&
 		artOK && productColor.MatchString(p.Color)
@@ -59,6 +64,10 @@ func (s *Server) saveProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
 	// Lock the category until the product is saved so renames and deletion cannot race.
 	if p.CategoryID > 0 {
 		err = tx.QueryRowContext(r.Context(), `SELECT id,name FROM categories WHERE id=$1 FOR SHARE`, p.CategoryID).Scan(&p.CategoryID, &p.Category)
@@ -75,8 +84,8 @@ func (s *Server) saveProduct(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	if r.Method == http.MethodPost {
-		err = tx.QueryRowContext(r.Context(), `INSERT INTO products(name,category,price,cost,stock,reorder_level,art,color,category_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-			p.Name, p.Category, p.Price, p.Cost, p.Stock, p.ReorderLevel, p.Art, p.Color, p.CategoryID).Scan(&id)
+		err = tx.QueryRowContext(r.Context(), `INSERT INTO products(name,category,price,cost,stock,reorder_level,art,color,category_id,sku,barcode,image_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+			p.Name, p.Category, p.Price, p.Cost, p.Stock, p.ReorderLevel, p.Art, p.Color, p.CategoryID, p.SKU, p.Barcode, p.ImageID).Scan(&id)
 		if err == nil && p.Stock > 0 {
 			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,note,created_by) VALUES($1,'opening',$2,'Opening stock',$3)`, id, p.Stock, principal(r).ID)
 		}
@@ -91,15 +100,18 @@ func (s *Server) saveProduct(w http.ResponseWriter, r *http.Request) {
 			problem(w, 400, "Use inventory adjustments to change stock")
 			return
 		}
-		err = tx.QueryRowContext(r.Context(), `UPDATE products SET name=$1,category=$2,price=$3,cost=$4,reorder_level=$5,art=$6,color=$7,category_id=$9 WHERE id=$8 AND active RETURNING id`,
-			p.Name, p.Category, p.Price, p.Cost, p.ReorderLevel, p.Art, p.Color, id, p.CategoryID).Scan(&id)
+		err = tx.QueryRowContext(r.Context(), `UPDATE products SET name=$1,category=$2,price=$3,cost=$4,reorder_level=$5,art=$6,color=$7,category_id=$9,sku=$10,barcode=$11,image_id=$12 WHERE id=$8 AND active RETURNING id`,
+			p.Name, p.Category, p.Price, p.Cost, p.ReorderLevel, p.Art, p.Color, id, p.CategoryID, p.SKU, p.Barcode, p.ImageID).Scan(&id)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		problem(w, 404, "Product not found")
 		return
 	}
-	if err != nil || tx.Commit() != nil {
-		problem(w, 500, "Could not save product")
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		productWriteError(w, err)
 		return
 	}
 	status := http.StatusOK
@@ -115,7 +127,7 @@ func (s *Server) deleteProduct(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Invalid product")
 		return
 	}
-	result, err := s.db.ExecContext(r.Context(), `UPDATE products SET active=false WHERE id=$1 AND active`, id)
+	result, err := s.auditedExec(r, `UPDATE products SET active=false WHERE id=$1 AND active`, id)
 	if err != nil {
 		problem(w, 500, "Could not delete product")
 		return
@@ -143,7 +155,7 @@ func (s *Server) deleteAllProducts(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Type DELETE ALL PRODUCTS to confirm")
 		return
 	}
-	result, err := s.db.ExecContext(r.Context(), `UPDATE products SET active=false WHERE active`)
+	result, err := s.auditedExec(r, `UPDATE products SET active=false WHERE active`)
 	if err != nil {
 		problem(w, 500, "Could not delete products")
 		return
