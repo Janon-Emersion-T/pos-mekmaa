@@ -230,7 +230,7 @@ async function refreshCategories(draft) {
 }
 function productManagement() {
   const p = products.find((p) => p.id === editingProduct);
-  const appearances = ["box","coffee","iced","matcha","tea","croissant","cookie","toast","sandwich","cake","roll"];
+  const appearances = ["box","bottle","none"];
   return categoryManagement() + `<form data-form="product" data-id="${p?.id || ""}" class="mb-6 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3">
     <h2 class="font-semibold sm:col-span-3">${p ? "Edit product" : "Add product"}</h2>
     ${field("Product name", "name", "text", p?.name || "")}
