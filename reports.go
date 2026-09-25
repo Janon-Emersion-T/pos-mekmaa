@@ -91,12 +91,14 @@ func (s *Server) auditHistory(w http.ResponseWriter, r *http.Request) {
 		var id, actor, eid int64
 		var at time.Time
 		var email, entity, action string
-		var before, after json.RawMessage
+		// INSERT/DELETE events have a NULL before/after snapshot. Scan into
+		// []byte so database/sql can represent SQL NULL before encoding JSON.
+		var before, after []byte
 		if rows.Scan(&id, &at, &actor, &email, &entity, &eid, &action, &before, &after) != nil {
 			problem(w, 500, "Could not read audit")
 			return
 		}
-		out = append(out, map[string]any{"id": id, "created": at, "actorId": actor, "actorEmail": email, "entity": entity, "entityId": eid, "action": action, "before": before, "after": after})
+		out = append(out, map[string]any{"id": id, "created": at, "actorId": actor, "actorEmail": email, "entity": entity, "entityId": eid, "action": action, "before": json.RawMessage(before), "after": json.RawMessage(after)})
 	}
 	if rows.Err() != nil {
 		problem(w, 500, "Could not read audit")

@@ -183,6 +183,8 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	if _, err = db.Exec(`UPDATE users SET role='superadmin' WHERE id=$1`, userID); err != nil {
 		t.Fatal(err)
 	}
+	request("GET", "/api/audit", "", 200)
+	request("GET", "/api/reports/daily", "", 200)
 	request("DELETE", salePath, `{"confirmation":"DELETE","reason":"Duplicate entry"}`, 400)
 	request("DELETE", salePath, fmt.Sprintf(`{"confirmation":"DELETE %d","reason":"   "}`, saleID), 400)
 	var before Session

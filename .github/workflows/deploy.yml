@@ -55,6 +55,12 @@ jobs:
       - name: Build Tailwind CSS
         run: npm run css
 
+      - name: Install browser for frontend tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Test frontend startup and checkout
+        run: npm test
+
       - name: Download Go dependencies
         run: go mod download
 

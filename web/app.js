@@ -777,7 +777,7 @@ $("#other-page").addEventListener("submit", async (e) => {
     if (submit) submit.disabled = false;
   }
 });
-(async () => {
+document.addEventListener("DOMContentLoaded", async () => {
   renderCart();
   try {
     const loaded = await Promise.all([
@@ -808,4 +808,4 @@ $("#other-page").addEventListener("submit", async (e) => {
       '<p class="col-span-full py-16 text-center text-sm text-red-500">Could not load the menu. Please reload to try again.</p>';
     toast(e.message);
   }
-})();
+}, { once: true });

@@ -41,6 +41,16 @@ go test ./...
 go build -o counter .
 ```
 
+Run the browser regression tests (menu startup, navigation, account changes, and checkout recovery):
+
+```sh
+npm ci
+npx playwright install chromium
+npm test
+```
+
+These tests use a local server with fixture API responses. Set `TEST_DATABASE_URL` to a disposable PostgreSQL database when running `go test ./...` to include the database integration tests.
+
 Prices use integer hundredths. Admins and superadmins can choose the store currency in Settings (USD by default; includes LKR, INR, EUR, GBP, AUD, CAD, SGD, AED, and SAR). The selection is saved in PostgreSQL and shared by all staff. It applies to all displayed amounts, including history, without converting numeric values. Supported currencies use two decimal places. Open a register session before checkout. Cash sales and petty-cash movements feed its expected closing cash. Purchases increase inventory; sales reduce it; adjustments require a reason. These operations are transactional and leave an inventory movement trail. Card payments remain manual records and no money is charged. Add authentication, authorization, backups, refunds, and a payment processor before public or production use.
 
 ## Products and navigation
