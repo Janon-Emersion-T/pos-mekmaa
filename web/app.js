@@ -246,11 +246,11 @@ function renderOther() {
     title = "Sales history";
     desc = "Orders are tied to the register session that created them.";
     body = table(
-      ["Order", "Date", "Items", "Payment", "Total"],
+      ["Order", "Date", "Items", "Payment", "Total", ...(currentUser.role === "superadmin" ? ["Action"] : [])],
       sales
         .map(
           (s) =>
-            `<tr class="border-b"><td class="p-4 font-semibold">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${escapeHTML(s.items)}</td><td class="p-4 capitalize">${s.payment}</td><td class="p-4 font-semibold">${money(s.total)}</td></tr>`,
+            `<tr class="border-b"><td class="p-4 font-semibold">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${escapeHTML(s.items)}</td><td class="p-4 capitalize">${s.payment}</td><td class="p-4 font-semibold">${money(s.total)}</td>${currentUser.role === "superadmin" ? `<td class="p-4"><button data-delete-sale="${s.id}" class="rounded-lg border border-red-200 px-3 py-2 text-xs text-red-600 disabled:opacity-50" aria-label="Delete sale #${s.id}">Delete sale</button></td>` : ""}</tr>`,
         )
         .join(""),
     );
@@ -377,6 +377,38 @@ async function navigate(next, push = true) {
   if (page !== "pos") $("#other-page").innerHTML = '<p class="text-sm text-gray-500">Loading…</p>';
   await loadPage();
 }
+function confirmAction({ title, description, details, label, deletion = false }) {
+  const dialog = $("#confirm-dialog");
+  if (dialog.open) return Promise.resolve(null);
+  $("#confirm-title").textContent = title;
+  $("#confirm-description").textContent = description;
+  $("#confirm-details").innerHTML = details;
+  $("#confirm-accept").textContent = label;
+  $("#confirm-accept").classList.toggle("bg-red-600", deletion);
+  $("#confirm-accept").classList.toggle("bg-ink", !deletion);
+  $("#confirm-reason-label").classList.toggle("hidden", !deletion);
+  $("#confirm-reason").required = deletion;
+  $("#confirm-reason").value = "";
+  $("#confirm-reason").setCustomValidity("");
+  return new Promise((resolve) => {
+    let result = null;
+    $("#confirm-form").onsubmit = (e) => {
+      e.preventDefault();
+      const reason = $("#confirm-reason").value.trim();
+      if (deletion && !reason) {
+        $("#confirm-reason").setCustomValidity("Enter a reason for deleting this sale.");
+        $("#confirm-reason").reportValidity();
+        return;
+      }
+      result = { reason };
+      dialog.close();
+    };
+    $("#confirm-reason").oninput = () => $("#confirm-reason").setCustomValidity("");
+    $("#confirm-cancel").onclick = () => dialog.close();
+    dialog.addEventListener("close", () => resolve(result), { once: true });
+    dialog.showModal();
+  });
+}
 document.addEventListener("click", async (e) => {
   const p = e.target.closest("[data-product]"),
     c = e.target.closest("[data-category]"),
@@ -393,6 +425,29 @@ document.addEventListener("click", async (e) => {
   if (n && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.button === 0) {
     e.preventDefault();
     navigate(n.dataset.page);
+  }
+  const deleteSale = e.target.closest("[data-delete-sale]");
+  if (deleteSale && currentUser.role === "superadmin" && !deleteSale.disabled) {
+    const sale = sales.find((s) => s.id === Number(deleteSale.dataset.deleteSale));
+    if (!sale) return;
+    deleteSale.disabled = true;
+    try {
+      const confirmation = await confirmAction({
+        title: `Delete sale #${sale.id}?`,
+        description: "This removes the sale from history, restores its stock, and reverses its cash contribution to the original register session. An audit record is kept. No payment refund is issued.",
+        details: `<p class="text-xs text-gray-500">${new Date(sale.created).toLocaleString()}</p><p class="mt-3">${escapeHTML(sale.items)}</p><div class="mt-4 flex justify-between border-t pt-4"><span class="capitalize">${sale.payment}</span><strong>${money(sale.total)}</strong></div>`,
+        label: "Delete sale", deletion: true,
+      });
+      if (!confirmation) return;
+      deleteSale.textContent = "Deleting…";
+      await api(`/api/sales/${sale.id}`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation: `DELETE ${sale.id}`, reason: confirmation.reason }),
+      });
+      await loadPage();
+      toast(`Sale #${sale.id} deleted. Stock and register totals updated.`);
+    } catch (err) { toast(err.message); }
+    finally { deleteSale.disabled = false; deleteSale.textContent = "Delete sale"; }
   }
   const edit = e.target.closest("[data-edit-product]");
   if (edit) { editingProduct = Number(edit.dataset.editProduct); renderOther(); }
@@ -476,6 +531,17 @@ $("#checkout").onclick = async () => {
   busy = true;
   renderCart();
   try {
+    const total = [...cart].reduce((sum, [id, quantity]) => sum + products.find((p) => p.id === id).price * quantity, 0);
+    const confirmation = await confirmAction({
+      title: "Complete this order?",
+      description: "Review the order and confirm that payment has been received.",
+      details: `<div class="space-y-3">${[...cart].map(([id, quantity]) => {
+        const p = products.find((p) => p.id === id);
+        return `<div class="flex justify-between gap-3"><span>${quantity} × ${escapeHTML(p.name)}</span><span class="shrink-0">${money(p.price * quantity)}</span></div>`;
+      }).join("")}</div><div class="mt-4 flex justify-between border-t pt-4"><span class="capitalize">${payment} · ${service}</span><strong>${money(total)}</strong></div>`,
+      label: "Confirm sale",
+    });
+    if (!confirmation) return;
     const sale = await api("/api/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -485,6 +551,7 @@ $("#checkout").onclick = async () => {
           quantity,
         })),
         payment,
+        expectedTotal: total,
       }),
     });
     $("#receipt").innerHTML =

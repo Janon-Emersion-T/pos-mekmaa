@@ -176,7 +176,7 @@ func (s *Server) activeSession(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }) (Session, error) {
 	var x Session
-	err := q.QueryRowContext(ctx, `SELECT id,opened_at,closed_at,opening_cash,closing_cash,status,opening_cash+COALESCE((SELECT SUM(total) FROM sales WHERE session_id=register_sessions.id AND payment='cash'),0)+COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM petty_cash_entries WHERE session_id=register_sessions.id),0) FROM register_sessions WHERE status='open' ORDER BY id DESC LIMIT 1`).Scan(&x.ID, &x.OpenedAt, &x.ClosedAt, &x.OpeningCash, &x.ClosingCash, &x.Status, &x.ExpectedCash)
+	err := q.QueryRowContext(ctx, `SELECT id,opened_at,closed_at,opening_cash,closing_cash,status,opening_cash+COALESCE((SELECT SUM(total) FROM sales WHERE session_id=register_sessions.id AND payment='cash' AND deleted_at IS NULL),0)+COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM petty_cash_entries WHERE session_id=register_sessions.id),0) FROM register_sessions WHERE status='open' ORDER BY id DESC LIMIT 1`).Scan(&x.ID, &x.OpenedAt, &x.ClosedAt, &x.OpeningCash, &x.ClosingCash, &x.Status, &x.ExpectedCash)
 	return x, err
 }
 
@@ -251,7 +251,7 @@ func (s *Server) products(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, out)
 }
 func (s *Server) sales(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT s.id,s.created_at,s.total,s.payment,string_agg(si.quantity||' × '||si.product_name,', ' ORDER BY si.id),s.session_id FROM sales s JOIN sale_items si ON si.sale_id=s.id GROUP BY s.id ORDER BY s.id DESC LIMIT 100`)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT s.id,s.created_at,s.total,s.payment,string_agg(si.quantity||' × '||si.product_name,', ' ORDER BY si.id),s.session_id FROM sales s JOIN sale_items si ON si.sale_id=s.id WHERE s.deleted_at IS NULL GROUP BY s.id ORDER BY s.id DESC LIMIT 100`)
 	if err != nil {
 		problem(w, 500, "Could not load sales")
 		return
@@ -270,8 +270,9 @@ func (s *Server) sales(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Items   []Line `json:"items"`
-		Payment string `json:"payment"`
+		Items         []Line `json:"items"`
+		Payment       string `json:"payment"`
+		ExpectedTotal *int   `json:"expectedTotal"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -328,6 +329,10 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		}
 		total += x.Price * line.Quantity
 		items = append(items, x)
+	}
+	if req.ExpectedTotal != nil && *req.ExpectedTotal != total {
+		problem(w, 409, "Prices have changed. Refresh the menu and review your order again.")
+		return
 	}
 	var id int64
 	created := time.Now()
@@ -830,6 +835,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("DELETE /api/products/{id}", requireRoles(s.deleteProduct, "superadmin", "admin"))
 	private.Handle("DELETE /api/products", requireRoles(s.deleteAllProducts, "superadmin", "admin"))
 	private.Handle("GET /api/products", requireRoles(s.products, "superadmin", "admin", "cashier"))
+	private.Handle("DELETE /api/sales/{id}", requireRoles(s.deleteSale, "superadmin"))
 	private.Handle("GET /api/sales", requireRoles(s.sales, "superadmin", "admin", "cashier"))
 	private.Handle("POST /api/checkout", requireRoles(s.checkout, "superadmin", "admin", "cashier"))
 	private.Handle("GET /api/session", requireRoles(s.sessions, "superadmin", "admin", "cashier"))

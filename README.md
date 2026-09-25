@@ -50,3 +50,9 @@ Each menu has a bookmarkable URL (for example, `/products`, `/inventory`, and `/
 Admins and superadmins can use **Products** to add and edit names, categories, prices, costs, reorder levels, and appearance. Opening stock is recorded when creating a product; subsequent stock changes use Inventory or Purchases. Category filters are generated from active products. Enter monetary amounts in the selected currency (for example, `125.50`); the API stores integer hundredths.
 
 Use **Delete** to remove one product or **Delete all products** to clear the active catalog, including existing starter items. Bulk removal requires typing `DELETE ALL PRODUCTS`. Removal preserves historical sales, purchases, and inventory records. Deleted products stay removed after restarting; startup does not seed demo products.
+
+## Sale confirmations and deletion
+
+Complete order opens a review dialog showing line items, payment method, and total. Cancel or Escape returns to the cart without creating a sale. Confirm sale records the payment; checkout rejects a total that changed after review.
+
+Only superadmins see **Delete sale** in Sales history, and the API enforces the same restriction. Deletion requires confirmation and a reason. It removes the sale from normal history, restores product stock once, and excludes the sale from its original register's expected cash. Closed-register counted cash remains unchanged. The sale, line items, deleting user, timestamp, reason, and stock reversal remain recorded for audit. This corrects an erroneous sale; it does not issue a cash or card refund.

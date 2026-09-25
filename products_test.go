@@ -98,7 +98,8 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	request("PUT", path, strings.ReplaceAll(body, `"stock":8`, `"stock":0`), 200)
 	request("PUT", path, body, 400)
 	request("POST", "/api/session/open", `{"openingCash":10000}`, 201)
-	request("POST", "/api/checkout", fmt.Sprintf(`{"items":[{"productId":%d,"quantity":1}],"payment":"cash"}`, created.ID), 201)
+	request("POST", "/api/checkout", fmt.Sprintf(`{"items":[{"productId":%d,"quantity":1}],"payment":"cash","expectedTotal":1}`, created.ID), 409)
+	request("POST", "/api/checkout", fmt.Sprintf(`{"items":[{"productId":%d,"quantity":1}],"payment":"cash","expectedTotal":12550}`, created.ID), 201)
 	request("DELETE", path, "", 200)
 	request("PUT", path, strings.ReplaceAll(body, `"stock":8`, `"stock":0`), 404)
 	request("POST", "/api/checkout", fmt.Sprintf(`{"items":[{"productId":%d,"quantity":1}],"payment":"cash"}`, created.ID), 400)
@@ -110,6 +111,57 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	}
 	if len(savedSales) != 1 || !strings.Contains(savedSales[0].Items, "Bread & butter") {
 		t.Fatal("sale history lost")
+	}
+	// Sale deletion must be restricted, reversible in inventory, and audited.
+	saleID := savedSales[0].ID
+	salePath := fmt.Sprintf("/api/sales/%d", saleID)
+	deleteBody := fmt.Sprintf(`{"confirmation":"DELETE %d","reason":"Duplicate entry"}`, saleID)
+	request("DELETE", salePath, deleteBody, 403)
+	if _, err = db.Exec(`UPDATE users SET role='superadmin' WHERE id=$1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	request("DELETE", salePath, `{"confirmation":"DELETE","reason":"Duplicate entry"}`, 400)
+	request("DELETE", salePath, fmt.Sprintf(`{"confirmation":"DELETE %d","reason":"   "}`, saleID), 400)
+	var before Session
+	if err = json.Unmarshal(request("GET", "/api/session", "", 200).Body.Bytes(), &before); err != nil {
+		t.Fatal(err)
+	}
+	if before.ExpectedCash != 22550 {
+		t.Fatalf("cash before deletion: %d", before.ExpectedCash)
+	}
+	// Force stock restoration to fail and verify the transaction leaves the sale intact.
+	if _, err = db.Exec(`UPDATE products SET stock=2147483647 WHERE id=$1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	request("DELETE", salePath, deleteBody, 500)
+	var deleted bool
+	if err = db.QueryRow(`SELECT deleted_at IS NOT NULL FROM sales WHERE id=$1`, saleID).Scan(&deleted); err != nil || deleted {
+		t.Fatalf("failed deletion changed sale: %v %v", deleted, err)
+	}
+	if _, err = db.Exec(`UPDATE products SET stock=7 WHERE id=$1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	request("DELETE", salePath, deleteBody, 200)
+	request("DELETE", salePath, deleteBody, 409)
+	var after Session
+	if err = json.Unmarshal(request("GET", "/api/session", "", 200).Body.Bytes(), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.ExpectedCash != 10000 {
+		t.Fatalf("cash after deletion: %d", after.ExpectedCash)
+	}
+	if err = db.QueryRow(`SELECT stock FROM products WHERE id=$1`, created.ID).Scan(&stock); err != nil || stock != 8 {
+		t.Fatalf("restored stock: %d %v", stock, err)
+	}
+	var auditCount int
+	if err = db.QueryRow(`SELECT count(*) FROM sales WHERE id=$1 AND deleted_by=$2 AND deleted_at IS NOT NULL AND deletion_reason='Duplicate entry'`, saleID, userID).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("sale audit: %d %v", auditCount, err)
+	}
+	if err = db.QueryRow(`SELECT count(*) FROM inventory_movements WHERE reference_type='sale_deletion' AND reference_id=$1 AND created_by=$2 AND quantity=1`, saleID, userID).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("stock audit: %d %v", auditCount, err)
+	}
+	if strings.TrimSpace(request("GET", "/api/sales", "", 200).Body.String()) != "[]" {
+		t.Fatal("deleted sale still listed")
 	}
 	request("POST", "/api/products", body, 201)
 	request("DELETE", "/api/products", `{"confirmation":"no"}`, 400)
@@ -128,4 +180,5 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	request("DELETE", path, "", 403)
 	request("DELETE", "/api/products", `{"confirmation":"DELETE ALL PRODUCTS"}`, 403)
 	request("GET", "/api/products", "", 200)
+	request("DELETE", salePath, deleteBody, 403)
 }
