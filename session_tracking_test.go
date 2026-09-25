@@ -20,6 +20,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
 	}
+	setTestBootstrapAdmin(t)
 	root, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -62,8 +63,11 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 		fn(w, r)
 		return w
 	}
-	order := fmt.Sprintf(`{"items":[{"productId":%d,"quantity":1}],"payment":"cash","expectedTotal":450}`, productID)
-	if w := call(s.checkout, cashier, "POST", "/api/checkout", order); w.Code != 409 {
+	// Each attempted sale needs its own key so idempotency cannot replay an earlier sale.
+	order := func(requestID string) string {
+		return fmt.Sprintf(`{"requestId":%q,"items":[{"productId":%d,"quantity":1}],"payment":"cash","cashReceived":450,"expectedTotal":450}`, requestID, productID)
+	}
+	if w := call(s.checkout, cashier, "POST", "/api/checkout", order("session-not-open-checkout")); w.Code != 409 {
 		t.Fatalf("sale without session: %d", w.Code)
 	}
 	open := func() int64 {
@@ -77,7 +81,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 		return result.ID
 	}
 	sessionID := open()
-	w := call(s.checkout, cashier, "POST", "/api/checkout", order)
+	w := call(s.checkout, cashier, "POST", "/api/checkout", order("session-initial-checkout"))
 	if w.Code != 201 {
 		t.Fatalf("checkout: %d %s", w.Code, w.Body.String())
 	}
@@ -103,7 +107,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("close: %s", w.Body.String())
 	}
-	w = call(s.checkout, cashier, "POST", "/api/checkout", order)
+	w = call(s.checkout, cashier, "POST", "/api/checkout", order("session-closed-checkout"))
 	if w.Code != 409 {
 		t.Fatalf("sale on closed register: %d", w.Code)
 	}
@@ -117,10 +121,11 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 	}
 	for i := 0; i < 5; i++ {
 		id := open()
-		stale := strings.TrimSuffix(order, "}") + fmt.Sprintf(`,"sessionId":%d}`, sessionID)
+		stale := strings.TrimSuffix(order(fmt.Sprintf("session-stale-checkout-%d", i)), "}") + fmt.Sprintf(`,"sessionId":%d}`, sessionID)
 		if w = call(s.checkout, cashier, "POST", "/api/checkout", stale); w.Code != 409 {
 			t.Fatalf("stale session accepted: %d", w.Code)
 		}
+		raceOrder := order(fmt.Sprintf("session-race-checkout-%d", i))
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		var saleResult, closeResult *httptest.ResponseRecorder
@@ -128,7 +133,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			saleResult = call(s.checkout, cashier, "POST", "/api/checkout", order)
+			saleResult = call(s.checkout, cashier, "POST", "/api/checkout", raceOrder)
 		}()
 		go func() {
 			defer wg.Done()

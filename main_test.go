@@ -10,6 +10,14 @@ import (
 	"testing"
 )
 
+// Fresh integration databases need bootstrap credentials just like first launch.
+// Keep these test-only values scoped to each test; t.Setenv restores the environment.
+func setTestBootstrapAdmin(t *testing.T) {
+	t.Helper()
+	t.Setenv("BOOTSTRAP_ADMIN_EMAIL", "bootstrap@example.test")
+	t.Setenv("BOOTSTRAP_ADMIN_PASSWORD", "test-only-bootstrap-password")
+}
+
 func TestAuthenticationGate(t *testing.T) {
 	h := (&Server{}).routes()
 	w := httptest.NewRecorder()
@@ -64,6 +72,7 @@ func TestPostgresMigration(t *testing.T) {
 	if url == "" {
 		t.Skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
 	}
+	setTestBootstrapAdmin(t)
 	db, err := openDB(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +134,7 @@ func TestSettingsPersistence(t *testing.T) {
 	if url == "" {
 		t.Skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
 	}
+	setTestBootstrapAdmin(t)
 	db, err := openDB(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)

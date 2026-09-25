@@ -72,6 +72,7 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	if url == "" {
 		t.Skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
 	}
+	setTestBootstrapAdmin(t)
 	db, err := openDB(context.Background(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -160,11 +161,11 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	request("PUT", path, strings.ReplaceAll(body, `"stock":8`, `"stock":0`), 200)
 	request("PUT", path, body, 400)
 	request("POST", "/api/session/open", `{"openingCash":10000}`, 201)
-	request("POST", "/api/checkout", fmt.Sprintf(`{"items":[{"productId":%d,"quantity":1}],"payment":"cash","expectedTotal":1}`, created.ID), 409)
-	request("POST", "/api/checkout", fmt.Sprintf(`{"items":[{"productId":%d,"quantity":1}],"payment":"cash","expectedTotal":12550}`, created.ID), 201)
+	request("POST", "/api/checkout", fmt.Sprintf(`{"requestId":"product-price-mismatch","items":[{"productId":%d,"quantity":1}],"payment":"cash","cashReceived":12550,"expectedTotal":1}`, created.ID), 409)
+	request("POST", "/api/checkout", fmt.Sprintf(`{"requestId":"product-valid-checkout","items":[{"productId":%d,"quantity":1}],"payment":"cash","cashReceived":12550,"expectedTotal":12550}`, created.ID), 201)
 	request("DELETE", path, "", 200)
 	request("PUT", path, strings.ReplaceAll(body, `"stock":8`, `"stock":0`), 404)
-	request("POST", "/api/checkout", fmt.Sprintf(`{"items":[{"productId":%d,"quantity":1}],"payment":"cash"}`, created.ID), 400)
+	request("POST", "/api/checkout", fmt.Sprintf(`{"requestId":"product-deleted-checkout","items":[{"productId":%d,"quantity":1}],"payment":"cash","cashReceived":12550}`, created.ID), 400)
 	request("POST", "/api/purchases", fmt.Sprintf(`{"supplier":"Test","items":[{"productId":%d,"quantity":1,"unitCost":100}]}`, created.ID), 400)
 	request("POST", "/api/inventory/adjustments", fmt.Sprintf(`{"productId":%d,"quantity":1,"note":"test"}`, created.ID), 404)
 	var savedSales []Sale
