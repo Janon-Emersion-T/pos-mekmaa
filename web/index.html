@@ -39,30 +39,25 @@
           Workspace
         </p>
         <nav class="space-y-1 px-4">
-          <button class="nav-item active" data-page="pos">
-            <span data-icon="grid"></span>Point of sale</button
-          ><button class="nav-item" data-page="session">
-            <span data-icon="cash"></span>Register session</button
-          ><button class="nav-item" data-page="sales">
-            <span data-icon="receipt"></span>Sales history</button
-          ><button
+          <a href="/pos" class="nav-item active" data-page="pos">
+            <span data-icon="grid"></span>Point of sale</a><a href="/session" class="nav-item" data-page="session">
+            <span data-icon="cash"></span>Register session</a><a href="/sales" class="nav-item" data-page="sales">
+            <span data-icon="receipt"></span>Sales history</a><a href="/inventory"
             class="nav-item"
             data-page="inventory"
             data-roles="superadmin admin"
           >
-            <span data-icon="box"></span>Inventory</button
-          ><button
+            <span data-icon="box"></span>Inventory</a><a href="/purchases"
             class="nav-item"
             data-page="purchases"
             data-roles="superadmin admin"
           >
-            <span data-icon="bakery"></span>Purchases</button
-          ><button class="nav-item" data-page="petty">
-            <span data-icon="card"></span>Petty cash</button
-          ><button class="nav-item" data-page="users" data-roles="superadmin">
+            <span data-icon="bakery"></span>Purchases</a><a href="/petty" class="nav-item" data-page="petty">
+            <span data-icon="card"></span>Petty cash</a><a href="/users" class="nav-item" data-page="users" data-roles="superadmin">
             <span data-icon="user"></span>Staff users
-          </button>
-        <button class="nav-item hidden" data-page="settings" data-roles="superadmin admin"><span data-icon="settings"></span>Settings</button>
+          </a>
+        <a href="/products" class="nav-item hidden" data-page="products" data-roles="superadmin admin"><span data-icon="box"></span>Products</a>
+        <a href="/settings" class="nav-item hidden" data-page="settings" data-roles="superadmin admin"><span data-icon="settings"></span>Settings</a>
         </nav>
         <div class="mt-auto p-5">
           <div class="rounded-xl bg-paper p-4">
@@ -121,26 +116,21 @@
           </div>
         </header>
         <nav class="flex gap-2 overflow-x-auto border-b bg-white p-3 lg:hidden">
-          <button class="category active" data-page="pos">POS</button
-          ><button class="category" data-page="session">Session</button
-          ><button class="category" data-page="sales">Sales</button
-          ><button
+          <a href="/pos" class="category active" data-page="pos">POS</a><a href="/session" class="category" data-page="session">Session</a><a href="/sales" class="category" data-page="sales">Sales</a><a href="/inventory"
             class="category"
             data-page="inventory"
             data-roles="superadmin admin"
           >
-            Inventory</button
-          ><button
+            Inventory</a><a href="/purchases"
             class="category"
             data-page="purchases"
             data-roles="superadmin admin"
           >
-            Purchases</button
-          ><button class="category" data-page="petty">Petty cash</button
-          ><button class="category" data-page="users" data-roles="superadmin">
+            Purchases</a><a href="/petty" class="category" data-page="petty">Petty cash</a><a href="/users" class="category" data-page="users" data-roles="superadmin">
             Staff
-          </button>
-        <button class="category hidden" data-page="settings" data-roles="superadmin admin">Settings</button>
+          </a>
+        <a href="/products" class="category hidden" data-page="products" data-roles="superadmin admin">Products</a>
+        <a href="/settings" class="category hidden" data-page="settings" data-roles="superadmin admin">Settings</a>
         </nav>
         <div id="pos-page" class="flex flex-col xl:flex-row">
           <main class="min-w-0 flex-1 p-5 xl:p-8">
@@ -181,7 +171,7 @@
             <div class="mb-4 flex items-center justify-between">
               <h2 id="category-title" class="text-sm font-semibold">
                 All products
-                <span class="ml-1 text-xs font-normal text-gray-400">(12)</span>
+                <span class="ml-1 text-xs font-normal text-gray-400">(0)</span>
               </h2>
               <span class="flex items-center gap-1.5 text-[10px] text-gray-400"
                 ><span class="h-1.5 w-1.5 rounded-full bg-green-500"></span>Live

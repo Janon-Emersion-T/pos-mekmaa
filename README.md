@@ -17,7 +17,7 @@ Then start the application:
 DATABASE_URL='postgres://counter:counter@localhost:5432/counter?sslmode=disable' go run .
 ```
 
-Open http://localhost:8886. The PostgreSQL schema and starter products are created on first launch. The default connection is `postgres://counter:counter@localhost:5432/counter?sslmode=disable`; override it with `DATABASE_URL`. Set `ADDR` to change the listening address, for example `ADDR=:9000`.
+Open http://localhost:8886. The PostgreSQL schema is created on first launch. New installations start with an empty product catalog. The default connection is `postgres://counter:counter@localhost:5432/counter?sslmode=disable`; override it with `DATABASE_URL`. Set `ADDR` to change the listening address, for example `ADDR=:9000`.
 
 `GET /healthz` is the unauthenticated readiness endpoint. It returns `200` only while PostgreSQL is reachable. Session cookies are marked secure when Nginx sends `X-Forwarded-Proto: https`; `COOKIE_SECURE=true` can enforce secure cookies independently of proxy headers.
 
@@ -42,3 +42,11 @@ go build -o counter .
 ```
 
 Prices use integer hundredths. Admins and superadmins can choose the store currency in Settings (USD by default; includes LKR, INR, EUR, GBP, AUD, CAD, SGD, AED, and SAR). The selection is saved in PostgreSQL and shared by all staff. It applies to all displayed amounts, including history, without converting numeric values. Supported currencies use two decimal places. Open a register session before checkout. Cash sales and petty-cash movements feed its expected closing cash. Purchases increase inventory; sales reduce it; adjustments require a reason. These operations are transactional and leave an inventory movement trail. Card payments remain manual records and no money is charged. Add authentication, authorization, backups, refunds, and a payment processor before public or production use.
+
+## Products and navigation
+
+Each menu has a bookmarkable URL (for example, `/products`, `/inventory`, and `/settings`), with browser Back/Forward and direct reload support.
+
+Admins and superadmins can use **Products** to add and edit names, categories, prices, costs, reorder levels, and appearance. Opening stock is recorded when creating a product; subsequent stock changes use Inventory or Purchases. Category filters are generated from active products. Enter monetary amounts in the selected currency (for example, `125.50`); the API stores integer hundredths.
+
+Use **Delete** to remove one product or **Delete all products** to clear the active catalog, including existing starter items. Bulk removal requires typing `DELETE ALL PRODUCTS`. Removal preserves historical sales, purchases, and inventory records. Deleted products stay removed after restarting; startup does not seed demo products.

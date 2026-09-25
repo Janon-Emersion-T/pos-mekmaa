@@ -1,3 +1,4 @@
+const escapeHTML = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const $ = (s) => document.querySelector(s);
 let settings = { currency: "USD", currencies: [] };
 let moneyFormatter;
@@ -37,7 +38,9 @@ document
   .forEach((el) => (el.innerHTML = icon(el.dataset.icon)));
 function art(p) {
   let shape = "";
-  if (p.art === "coffee")
+  if (p.art === "box")
+    shape = '<path d="M45 60l55-25 55 25v65l-55 25-55-25zM45 60l55 25 55-25M100 85v65" fill="#fff" stroke="#777" stroke-width="4"/>';
+  else if (p.art === "coffee")
     shape =
       '<ellipse cx="100" cy="132" rx="61" ry="17" fill="#fbf7ee"/><ellipse cx="100" cy="131" rx="45" ry="10" fill="#ddd7ca"/><path d="M139 75c34-9 34 35 4 34" fill="none" stroke="#fffdf7" stroke-width="12"/><path d="M51 69h95l-9 51c-4 20-70 20-76 0z" fill="#fcfaf4"/><ellipse cx="99" cy="70" rx="48" ry="19" fill="#fffdf7"/><ellipse cx="99" cy="71" rx="41" ry="14" fill="#ad6e3d"/><path d="M98 82c-33-7-26-21-11-17l11 8 11-8c17-4 22 10-11 17" fill="#f4e8cb"/><path d="M100 82V66" stroke="#ad6e3d" stroke-width="2"/>';
   else if (["iced", "matcha", "tea"].includes(p.art)) {
@@ -58,7 +61,7 @@ function art(p) {
   else
     shape =
       '<ellipse cx="100" cy="132" rx="63" ry="16" fill="#f9f5ec"/><ellipse cx="100" cy="102" rx="49" ry="36" fill="#b27537"/><ellipse cx="100" cy="92" rx="49" ry="33" fill="#dba15c"/><path d="M61 97c-12-44 84-47 79-5-3 32-70 27-65 0 3-19 49-24 49-3 0 16-31 19-31 6 0-5 11-6 15-2" fill="none" stroke="#89502f" stroke-width="7"/><path d="M59 88q35-19 81-4M67 104l59-31M82 118l57-23" stroke="#faebcc" stroke-width="5" opacity=".85"/>';
-  return `<svg viewBox="0 0 200 170" role="img" aria-label="${p.name}">${shape}</svg>`;
+  return `<svg viewBox="0 0 200 170" role="img" aria-label="${escapeHTML(p.name)}">${shape}</svg>`;
 }
 let products = [],
   sales = [],
@@ -69,21 +72,34 @@ let products = [],
   session = null,
   currentUser = null,
   cart = new Map(),
-  category = "All products",
+  category = "",
   payment = "cash",
   page = "pos",
   busy = false,
   service = "Dine in";
-const categories = [
-  ["All products", "grid"],
-  ["Coffee", "coffee"],
-  ["Tea & more", "tea"],
-  ["Bakery", "bakery"],
-  ["Kitchen", "kitchen"],
-  ["Desserts", "cake"],
-];
+let editingProduct = null;
+let pageRequest = 0;
+const pageTitles = {
+  pos: "Point of sale", products: "Products", session: "Register session",
+  sales: "Sales history", inventory: "Inventory", purchases: "Purchases",
+  petty: "Petty cash", users: "Staff users", settings: "Settings",
+};
+function canVisit(next) {
+  if (!Object.hasOwn(pageTitles, next)) return false;
+  if (next === "users") return currentUser?.role === "superadmin";
+  return !["products","inventory","purchases","settings"].includes(next) ||
+    ["admin","superadmin"].includes(currentUser?.role);
+}
+function pageFromURL() {
+  return location.pathname.replace(/^\/|\/$/g, "") || "pos";
+}
+window.addEventListener("popstate", () => navigate(pageFromURL(), false));
 async function api(path, options) {
   const r = await fetch(path, options);
+  if (r.status === 401) {
+    location.replace("/login?next=" + encodeURIComponent(location.pathname));
+    throw Error("Please sign in again");
+  }
   const data = await r.json();
   if (!r.ok) throw Error(data.error || "Something went wrong");
   return data;
@@ -96,30 +112,37 @@ function toast(message) {
   toastTimer = setTimeout(() => $("#toast").classList.add("hidden"), 3500);
 }
 function renderProducts() {
+  const categories = [...new Set(products.map((p) => p.category))].sort();
+  if (category && !categories.includes(category)) category = "";
   const term = $("#search").value.toLowerCase();
   const filtered = products.filter(
     (p) =>
-      (category === "All products" || p.category === category) &&
+      (category === "" || p.category === category) &&
       p.name.toLowerCase().includes(term),
   );
-  $("#categories").innerHTML = categories
+  $("#categories").innerHTML = [["", "grid"], ...categories.map((name) => [name, "box"])]
     .map(
       ([name, i]) =>
-        `<button class="category ${category === name ? "active" : ""}" data-category="${name}">${icon(i)}${name}</button>`,
+        `<button class="category ${category === name ? "active" : ""}" data-category="${escapeHTML(name)}">${icon(i)}${escapeHTML(name || "All products")}</button>`,
     )
     .join("");
   $("#category-title").innerHTML =
-    `${category} <span class="ml-1 text-xs font-normal text-gray-400">(${filtered.length})</span>`;
+    `${escapeHTML(category || "All products")} <span class="ml-1 text-xs font-normal text-gray-400">(${filtered.length})</span>`;
   $("#products").innerHTML =
     filtered
       .map(
         (p) =>
-          `<button class="product group ${p.stock === 0 ? "opacity-50" : ""}" data-product="${p.id}" ${p.stock === 0 ? "disabled" : ""} aria-label="Add ${p.name} to order"><div class="product-art relative h-36 p-1" style="background:${p.color}">${art(p)}<span class="absolute left-3 top-3 rounded-md bg-white/80 px-1.5 py-1 text-[8px] font-medium text-gray-600">${p.stock === 0 ? "Sold out" : p.stock + " available"}</span></div><div class="p-3.5"><p class="text-[10px] text-gray-400">${p.category}</p><h3 class="mt-1 truncate text-xs font-semibold">${p.name}</h3><div class="mt-3 flex items-center justify-between"><span class="text-sm font-semibold">${money(p.price)}</span><span class="flex h-6 w-6 items-center justify-center rounded-md bg-orange-50 text-lg font-light text-orange-500 transition group-hover:bg-accent group-hover:text-white">+</span></div></div></button>`,
+          `<button class="product group ${p.stock === 0 ? "opacity-50" : ""}" data-product="${p.id}" ${p.stock === 0 ? "disabled" : ""} aria-label="Add ${escapeHTML(p.name)} to order"><div class="product-art relative h-36 p-1" style="background:${escapeHTML(p.color)}">${art(p)}<span class="absolute left-3 top-3 rounded-md bg-white/80 px-1.5 py-1 text-[8px] font-medium text-gray-600">${p.stock === 0 ? "Sold out" : p.stock + " available"}</span></div><div class="p-3.5"><p class="text-[10px] text-gray-400">${escapeHTML(p.category)}</p><h3 class="mt-1 truncate text-xs font-semibold">${escapeHTML(p.name)}</h3><div class="mt-3 flex items-center justify-between"><span class="text-sm font-semibold">${money(p.price)}</span><span class="flex h-6 w-6 items-center justify-center rounded-md bg-orange-50 text-lg font-light text-orange-500 transition group-hover:bg-accent group-hover:text-white">+</span></div></div></button>`,
       )
       .join("") ||
-    '<p class="col-span-full py-20 text-center text-sm text-gray-400">No products found. Try another search.</p>';
+    `<p class="col-span-full py-20 text-center text-sm text-gray-400">${products.length ? "No matching products. Try another search." : "No products yet. Add products from the Products menu to start selling."}</p>`;
 }
 function renderCart() {
+  for (const [id, qty] of cart) {
+    const p = products.find((p) => p.id === id);
+    if (!p || p.stock === 0) cart.delete(id);
+    else if (qty > p.stock) cart.set(id, p.stock);
+  }
   let total = 0,
     count = 0;
   $("#cart").innerHTML =
@@ -128,7 +151,7 @@ function renderCart() {
         const p = products.find((p) => p.id === id);
         total += p.price * qty;
         count += qty;
-        return `<div class="flex items-center gap-3"><div class="product-art h-14 w-14 shrink-0 rounded-lg" style="background:${p.color}">${art(p)}</div><div class="min-w-0 flex-1"><h3 class="truncate text-xs font-medium">${p.name}</h3><p class="mt-1 text-[10px] text-gray-400">${money(p.price)}</p><div class="mt-2 flex items-center gap-2"><button class="flex h-5 w-5 items-center justify-center rounded border border-gray-200 text-xs" data-delta="-1" data-id="${id}" aria-label="Remove one ${p.name}">−</button><span class="w-3 text-center text-[10px]">${qty}</span><button class="flex h-5 w-5 items-center justify-center rounded border border-gray-200 text-xs" data-delta="1" data-id="${id}" aria-label="Add one ${p.name}">+</button></div></div><span class="text-xs font-semibold">${money(p.price * qty)}</span></div>`;
+        return `<div class="flex items-center gap-3"><div class="product-art h-14 w-14 shrink-0 rounded-lg" style="background:${escapeHTML(p.color)}">${art(p)}</div><div class="min-w-0 flex-1"><h3 class="truncate text-xs font-medium">${escapeHTML(p.name)}</h3><p class="mt-1 text-[10px] text-gray-400">${money(p.price)}</p><div class="mt-2 flex items-center gap-2"><button class="flex h-5 w-5 items-center justify-center rounded border border-gray-200 text-xs" data-delta="-1" data-id="${id}" aria-label="Remove one ${escapeHTML(p.name)}">−</button><span class="w-3 text-center text-[10px]">${qty}</span><button class="flex h-5 w-5 items-center justify-center rounded border border-gray-200 text-xs" data-delta="1" data-id="${id}" aria-label="Add one ${escapeHTML(p.name)}">+</button></div></div><span class="text-xs font-semibold">${money(p.price * qty)}</span></div>`;
       })
       .join("") ||
     `<div class="flex h-full min-h-52 flex-col items-center justify-center text-gray-300"><div class="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-gray-50">${icon("receipt")}</div><p class="text-sm font-medium text-gray-500">A good day starts here</p><p class="mt-2 text-[11px] text-gray-400">Choose a product to start an order.</p></div>`;
@@ -141,6 +164,7 @@ function add(id, delta = 1) {
   if (busy) return;
   const p = products.find((p) => p.id === id),
     qty = (cart.get(id) || 0) + delta;
+  if (!p) return;
   if (qty > p.stock) {
     toast(`Only ${p.stock} ${p.name} available`);
     return;
@@ -150,15 +174,46 @@ function add(id, delta = 1) {
   renderCart();
 }
 const field = (label, name, type = "text", value = "") =>
-  `<label class="block text-xs font-medium text-gray-600">${label}<input name="${name}" type="${type}" value="${value}" required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3"></label>`;
+  `<label class="block text-xs font-medium text-gray-600">${label}<input name="${name}" type="${type}" value="${escapeHTML(value)}" ${type === "number" ? `step="1" max="1000000" ${name === "quantity" ? "" : 'min="0"'}` : ""} ${name === "name" ? 'maxlength="200"' : name === "category" ? 'maxlength="100"' : ""} required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3"></label>`;
 const table = (heads, rows) =>
   `<div class="overflow-x-auto rounded-xl border border-gray-200 bg-white"><table class="w-full text-left text-xs"><thead class="border-b bg-gray-50 text-gray-400"><tr>${heads.map((x) => `<th class="p-4 font-medium">${x}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${heads.length}" class="p-14 text-center text-gray-400">No records yet.</td></tr>`}</tbody></table></div>`;
+const amountField = (label, name, value = "") =>
+  `<label class="block text-xs font-medium text-gray-600">${label} (${settings.currency})<input name="${name}" type="number" min="0" max="100000" step="0.01" value="${value}" required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3"></label>`;
+function minorUnits(value) {
+  if (!/^\d+(\.\d{1,2})?$/.test(value)) throw Error("Enter an amount with up to two decimal places");
+  const n = Math.round(Number(value) * 100);
+  if (!Number.isSafeInteger(n) || n > 10000000) throw Error("Amount is too large");
+  return n;
+}
+function productManagement() {
+  const p = products.find((p) => p.id === editingProduct);
+  const appearances = ["box","coffee","iced","matcha","tea","croissant","cookie","toast","sandwich","cake","roll"];
+  return `<form data-form="product" data-id="${p?.id || ""}" class="mb-6 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3">
+    <h2 class="font-semibold sm:col-span-3">${p ? "Edit product" : "Add product"}</h2>
+    ${field("Product name", "name", "text", p?.name || "")}
+    ${field("Category", "category", "text", p?.category || "")}
+    ${amountField("Selling price", "price", p ? (p.price / 100).toFixed(2) : "")}
+    ${amountField("Cost", "cost", p ? (p.cost / 100).toFixed(2) : "0.00")}
+    ${p ? '<p class="text-xs text-gray-500">Change stock through Inventory adjustments.</p>' : field("Opening stock", "stock", "number", "0")}
+    ${field("Reorder level", "reorderLevel", "number", p?.reorderLevel ?? 10)}
+    <label class="text-xs font-medium text-gray-600">Appearance<select name="art" class="mt-2 h-11 w-full rounded-lg border px-3">${appearances.map((a) => `<option ${a === (p?.art || "box") ? "selected" : ""}>${a}</option>`).join("")}</select></label>
+    ${field("Background color", "color", "color", p?.color || "#eeeeee")}
+    <div class="flex items-center gap-3"><button class="rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">${p ? "Save changes" : "Add product"}</button>${p ? '<button type="button" data-cancel-product class="text-sm text-gray-500">Cancel</button>' : ""}</div>
+  </form>
+  <div class="mb-4 flex items-center justify-between"><h2 class="font-semibold">Products (${products.length})</h2><button data-delete-all class="rounded-lg border px-4 py-2 text-xs text-red-600 disabled:opacity-50" ${products.length ? "" : "disabled"}>Delete all products</button></div>
+  ${table(["Product","Category","Price","Cost","Stock","Actions"], products.map((p) => `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(p.name)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${money(p.price)}</td><td class="p-4">${money(p.cost)}</td><td class="p-4">${p.stock}</td><td class="p-4"><button data-edit-product="${p.id}" class="mr-3 text-orange-600">Edit</button><button data-delete-product="${p.id}" class="text-red-600">Delete</button></td></tr>`).join(""))}
+  <p class="mt-3 text-xs text-gray-500">Deleted products are removed from the catalog. Past sales, purchases, and stock records are kept.</p>`;
+}
 function renderOther() {
   if (page === "pos") return;
   let title = "",
     desc = "",
     body = "";
-  if (page === "settings") {
+  if (page === "products") {
+    title = "Products";
+    desc = "Add your products and categories, set prices, and manage the catalog.";
+    body = productManagement();
+  } else if (page === "settings") {
     title = "Settings";
     desc = "Manage preferences for this store.";
     body = `<form data-form="settings" class="max-w-md rounded-xl border bg-white p-5">
@@ -183,7 +238,7 @@ function renderOther() {
         users
           .map(
             (u) =>
-              `<tr class="border-b"><td class="p-4 font-medium">${u.email}</td><td class="p-4 capitalize">${u.role}</td><td class="p-4"><span class="rounded-full px-2 py-1 ${u.active ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}">${u.active ? "Active" : "Disabled"}</span></td><td class="p-4">${new Date(u.createdAt).toLocaleDateString()}</td><td class="p-4">${u.id === currentUser.id ? '<span class="text-gray-400">Current user</span>' : `<button data-user-toggle="${u.id}" data-active="${!u.active}" class="text-orange-600">${u.active ? "Disable" : "Enable"}</button>`}</td></tr>`,
+              `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(u.email)}</td><td class="p-4 capitalize">${escapeHTML(u.role)}</td><td class="p-4"><span class="rounded-full px-2 py-1 ${u.active ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}">${u.active ? "Active" : "Disabled"}</span></td><td class="p-4">${new Date(u.createdAt).toLocaleDateString()}</td><td class="p-4">${u.id === currentUser.id ? '<span class="text-gray-400">Current user</span>' : `<button data-user-toggle="${u.id}" data-active="${!u.active}" class="text-orange-600">${u.active ? "Disable" : "Enable"}</button>`}</td></tr>`,
           )
           .join(""),
       );
@@ -195,7 +250,7 @@ function renderOther() {
       sales
         .map(
           (s) =>
-            `<tr class="border-b"><td class="p-4 font-semibold">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${s.items}</td><td class="p-4 capitalize">${s.payment}</td><td class="p-4 font-semibold">${money(s.total)}</td></tr>`,
+            `<tr class="border-b"><td class="p-4 font-semibold">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${escapeHTML(s.items)}</td><td class="p-4 capitalize">${s.payment}</td><td class="p-4 font-semibold">${money(s.total)}</td></tr>`,
         )
         .join(""),
     );
@@ -215,19 +270,19 @@ function renderOther() {
           )
           .join(
             "",
-          )}</div><form data-form="close-session" class="mt-6 max-w-md rounded-xl border bg-white p-5">${field("Counted closing cash", "closingCash", "number")}<button class="mt-4 rounded-lg bg-ink px-5 py-3 text-sm text-white">Close session</button></form>`
-      : `<form data-form="open-session" class="max-w-md rounded-xl border bg-white p-5">${field("Opening cash", "openingCash", "number", "0")}<button class="mt-4 rounded-lg bg-accent px-5 py-3 text-sm text-white">Open register session</button></form>`;
+          )}</div><form data-form="close-session" class="mt-6 max-w-md rounded-xl border bg-white p-5">${amountField("Counted closing cash", "closingCash")}<button class="mt-4 rounded-lg bg-ink px-5 py-3 text-sm text-white">Close session</button></form>`
+      : `<form data-form="open-session" class="max-w-md rounded-xl border bg-white p-5">${amountField("Opening cash", "openingCash", "0.00")}<button class="mt-4 rounded-lg bg-accent px-5 py-3 text-sm text-white">Open register session</button></form>`;
   } else if (page === "inventory") {
     title = "Inventory";
     desc = "Current stock plus an audit trail. No expiry or batch tracking.";
     body =
-      `<form data-form="adjust" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-4"><label class="text-xs">Product<select name="productId" class="mt-2 h-11 w-full rounded-lg border px-3">${products.map((p) => `<option value="${p.id}">${p.name}</option>`)}</select></label>${field("Quantity (+ or −)", "quantity", "number")}${field("Reason", "note")}<button class="mt-6 h-11 rounded-lg bg-ink text-sm text-white">Record adjustment</button></form>` +
+      `<form data-form="adjust" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-4"><label class="text-xs">Product<select name="productId" required class="mt-2 h-11 w-full rounded-lg border px-3">${products.map((p) => `<option value="${p.id}">${escapeHTML(p.name)}</option>`)}</select></label>${field("Quantity (+ or −)", "quantity", "number")}${field("Reason", "note")}<button class="mt-6 h-11 rounded-lg bg-ink text-sm text-white">Record adjustment</button></form>` +
       table(
         ["Product", "Category", "Cost", "Price", "Stock", "Reorder"],
         products
           .map(
             (p) =>
-              `<tr class="border-b"><td class="p-4 font-medium">${p.name}</td><td class="p-4">${p.category}</td><td class="p-4">${money(p.cost)}</td><td class="p-4">${money(p.price)}</td><td class="p-4 font-semibold">${p.stock}</td><td class="p-4">${p.reorderLevel}</td></tr>`,
+              `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(p.name)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${money(p.cost)}</td><td class="p-4">${money(p.price)}</td><td class="p-4 font-semibold">${p.stock}</td><td class="p-4">${p.reorderLevel}</td></tr>`,
           )
           .join(""),
       ) +
@@ -237,7 +292,7 @@ function renderOther() {
         movements
           .map(
             (m) =>
-              `<tr class="border-b"><td class="p-4">${new Date(m.created).toLocaleString()}</td><td class="p-4">${m.product}</td><td class="p-4 capitalize">${m.kind}</td><td class="p-4 font-semibold ${m.quantity > 0 ? "text-green-600" : "text-red-500"}">${m.quantity > 0 ? "+" : ""}${m.quantity}</td><td class="p-4">${m.note}</td></tr>`,
+              `<tr class="border-b"><td class="p-4">${new Date(m.created).toLocaleString()}</td><td class="p-4">${escapeHTML(m.product)}</td><td class="p-4 capitalize">${escapeHTML(m.kind)}</td><td class="p-4 font-semibold ${m.quantity > 0 ? "text-green-600" : "text-red-500"}">${m.quantity > 0 ? "+" : ""}${m.quantity}</td><td class="p-4">${escapeHTML(m.note)}</td></tr>`,
           )
           .join(""),
       );
@@ -246,13 +301,13 @@ function renderOther() {
     desc =
       "Receive supplier stock and update product costs in one transaction.";
     body =
-      `<form data-form="purchase" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-5">${field("Supplier", "supplier")}${field("Invoice", "invoiceNumber")}<label class="text-xs">Product<select name="productId" class="mt-2 h-11 w-full rounded-lg border px-3">${products.map((p) => `<option value="${p.id}">${p.name}</option>`)}</select></label>${field("Quantity", "quantity", "number", "1")}${field("Unit cost", "unitCost", "number")}<button class="h-11 rounded-lg bg-ink text-sm text-white sm:col-span-5">Receive purchase</button></form>` +
+      `<form data-form="purchase" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-5">${field("Supplier", "supplier")}${field("Invoice", "invoiceNumber")}<label class="text-xs">Product<select name="productId" required class="mt-2 h-11 w-full rounded-lg border px-3">${products.map((p) => `<option value="${p.id}">${escapeHTML(p.name)}</option>`)}</select></label>${field("Quantity", "quantity", "number", "1")}${amountField("Unit cost", "unitCost")}<button class="h-11 rounded-lg bg-ink text-sm text-white sm:col-span-5">Receive purchase</button></form>` +
       table(
         ["Purchase", "Date", "Supplier", "Invoice", "Items", "Total"],
         purchases
           .map(
             (p) =>
-              `<tr class="border-b"><td class="p-4 font-semibold">#${p.id}</td><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4">${p.supplier}</td><td class="p-4">${p.invoiceNumber || "—"}</td><td class="p-4">${p.items}</td><td class="p-4 font-semibold">${money(p.total)}</td></tr>`,
+              `<tr class="border-b"><td class="p-4 font-semibold">#${p.id}</td><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4">${escapeHTML(p.supplier)}</td><td class="p-4">${escapeHTML(p.invoiceNumber || "—")}</td><td class="p-4">${escapeHTML(p.items)}</td><td class="p-4 font-semibold">${money(p.total)}</td></tr>`,
           )
           .join(""),
       );
@@ -260,53 +315,66 @@ function renderOther() {
     title = "Petty cash";
     desc = "Record cash paid into or taken from the active register session.";
     body =
-      `<form data-form="petty" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-4"><label class="text-xs">Direction<select name="direction" class="mt-2 h-11 w-full rounded-lg border px-3"><option value="out">Cash out</option><option value="in">Cash in</option></select></label>${field("Amount", "amount", "number")}${field("Category", "category")}${field("Note", "note")}<button class="h-11 rounded-lg bg-ink text-sm text-white sm:col-span-4">Save entry</button></form>` +
+      `<form data-form="petty" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-4"><label class="text-xs">Direction<select name="direction" class="mt-2 h-11 w-full rounded-lg border px-3"><option value="out">Cash out</option><option value="in">Cash in</option></select></label>${amountField("Amount", "amount")}${field("Category", "category")}${field("Note", "note")}<button class="h-11 rounded-lg bg-ink text-sm text-white sm:col-span-4">Save entry</button></form>` +
       table(
         ["Date", "Direction", "Category", "Note", "Amount"],
         petty
           .map(
             (p) =>
-              `<tr class="border-b"><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4 capitalize">${p.direction}</td><td class="p-4">${p.category}</td><td class="p-4">${p.note}</td><td class="p-4 font-semibold ${p.direction === "in" ? "text-green-600" : "text-red-500"}">${p.direction === "in" ? "+" : "−"}${money(p.amount)}</td></tr>`,
+              `<tr class="border-b"><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4 capitalize">${escapeHTML(p.direction)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${escapeHTML(p.note)}</td><td class="p-4 font-semibold ${p.direction === "in" ? "text-green-600" : "text-red-500"}">${p.direction === "in" ? "+" : "−"}${money(p.amount)}</td></tr>`,
           )
           .join(""),
       );
   }
   $("#other-page").innerHTML =
     `<div class="mb-7"><h1 class="text-2xl font-semibold">${title}</h1><p class="mt-2 text-sm text-gray-400">${desc}</p></div>${body}`;
+  if (!products.length && ["inventory", "purchases"].includes(page)) {
+    $("#other-page").querySelectorAll("form button, form input, form select").forEach((el) => el.disabled = true);
+    $("#other-page").insertAdjacentHTML("afterbegin", '<p class="mb-4 text-sm text-gray-500">Add a product in <a href="/products" data-page="products" class="text-orange-600">Products</a> before recording stock.</p>');
+  }
 }
 async function loadPage() {
+  const request = ++pageRequest, requestedPage = page;
   try {
-    applySettings(await api("/api/settings"));
+    const endpoints = { sales: "/api/sales", inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
+    const [savedSettings, savedProducts, savedSession, records] = await Promise.all([
+      api("/api/settings"), api("/api/products"), api("/api/session"),
+      endpoints[requestedPage] ? api(endpoints[requestedPage]) : Promise.resolve(null),
+    ]);
+    if (request !== pageRequest) return;
+    applySettings(savedSettings);
+    products = savedProducts;
+    session = savedSession;
+    if (requestedPage === "sales") sales = records;
+    if (requestedPage === "inventory") movements = records;
+    if (requestedPage === "purchases") purchases = records;
+    if (requestedPage === "petty") petty = records;
+    if (requestedPage === "users") users = records;
     renderProducts();
     renderCart();
-    session = await api("/api/session");
-    if (page === "sales") sales = await api("/api/sales");
-    if (page === "inventory") movements = await api("/api/inventory/movements");
-    if (page === "purchases") purchases = await api("/api/purchases");
-    if (page === "petty") petty = await api("/api/petty-cash");
-    if (page === "users") users = await api("/api/users");
+    renderOther();
   } catch (e) {
+    if (request !== pageRequest) return;
     toast(e.message);
+    if (page !== "pos") $("#other-page").innerHTML = '<p class="text-sm text-red-500">Could not load this page. Select the menu again to retry.</p>';
   }
-  renderOther();
 }
-async function navigate(next) {
+async function navigate(next, push = true) {
+  if (!currentUser) return;
+  if (!canVisit(next)) { next = "pos"; push = false; }
   page = next;
+  const path = "/" + page;
+  if (location.pathname !== path) history[push ? "pushState" : "replaceState"]({}, "", path);
   $("#pos-page").classList.toggle("hidden", page !== "pos");
   $("#other-page").classList.toggle("hidden", page === "pos");
-  $("#breadcrumb").textContent = {
-    pos: "Point of sale",
-    session: "Register session",
-    sales: "Sales history",
-    inventory: "Inventory",
-    purchases: "Purchases",
-    petty: "Petty cash",
-    users: "Staff users",
-    settings: "Settings",
-  }[page];
-  document
-    .querySelectorAll("[data-page]")
-    .forEach((el) => el.classList.toggle("active", el.dataset.page === page));
+  $("#breadcrumb").textContent = pageTitles[page];
+  document.title = pageTitles[page] + " — Counter";
+  document.querySelectorAll("[data-page]").forEach((el) => {
+    el.classList.toggle("active", el.dataset.page === page);
+    if (el.dataset.page === page) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
+  });
+  if (page !== "pos") $("#other-page").innerHTML = '<p class="text-sm text-gray-500">Loading…</p>';
   await loadPage();
 }
 document.addEventListener("click", async (e) => {
@@ -322,7 +390,37 @@ document.addEventListener("click", async (e) => {
     renderProducts();
   }
   if (d) add(Number(d.dataset.id), Number(d.dataset.delta));
-  if (n) navigate(n.dataset.page);
+  if (n && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.button === 0) {
+    e.preventDefault();
+    navigate(n.dataset.page);
+  }
+  const edit = e.target.closest("[data-edit-product]");
+  if (edit) { editingProduct = Number(edit.dataset.editProduct); renderOther(); }
+  if (e.target.closest("[data-cancel-product]")) { editingProduct = null; renderOther(); }
+  const remove = e.target.closest("[data-delete-product]"), removeAll = e.target.closest("[data-delete-all]");
+  if (remove || removeAll) {
+    const target = remove || removeAll;
+    if (target.disabled) return;
+    let body;
+    if (removeAll) {
+      const confirmation = window.prompt("Remove all products from the catalog? Past records will be kept. Type DELETE ALL PRODUCTS to confirm.");
+      if (confirmation !== "DELETE ALL PRODUCTS") return;
+      body = JSON.stringify({ confirmation });
+    } else {
+      const product = products.find((p) => p.id === Number(remove.dataset.deleteProduct));
+      if (!product || !window.confirm(`Delete "${product.name}" from the catalog? Past records will be kept.`)) return;
+    }
+    target.disabled = true;
+    try {
+      await api(removeAll ? "/api/products" : `/api/products/${remove.dataset.deleteProduct}`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" }, body,
+      });
+      editingProduct = null;
+      await loadPage();
+      toast(removeAll ? "All products removed from the catalog" : "Product deleted");
+    } catch (err) { toast(err.message); }
+    finally { target.disabled = false; }
+  }
   if (toggle) {
     try {
       await api(`/api/users/${toggle.dataset.userToggle}`, {
@@ -395,7 +493,7 @@ $("#checkout").onclick = async () => {
       ]
         .map(([id, q]) => {
           const p = products.find((p) => p.id === id);
-          return `<div class="flex justify-between"><span>${q} × ${p.name}</span><span>${money(q * p.price)}</span></div>`;
+          return `<div class="flex justify-between"><span>${q} × ${escapeHTML(p.name)}</span><span>${money(q * p.price)}</span></div>`;
         })
         .join(
           "",
@@ -432,7 +530,27 @@ $("#other-page").addEventListener("submit", async (e) => {
   const f = e.target,
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
+  if (f.dataset.saving) return;
+  f.dataset.saving = "true";
+  const submit = f.querySelector('button:not([type="button"])');
+  if (submit) submit.disabled = true;
   try {
+    if (kind === "product") {
+      await api(f.dataset.id ? `/api/products/${f.dataset.id}` : "/api/products", {
+        method: f.dataset.id ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: data.name, category: data.category,
+          price: minorUnits(data.price), cost: minorUnits(data.cost),
+          stock: f.dataset.id ? 0 : Number(data.stock),
+          reorderLevel: Number(data.reorderLevel), art: data.art, color: data.color,
+        }),
+      });
+      editingProduct = null;
+      await loadPage();
+      toast(f.dataset.id ? "Product updated" : "Product added");
+      return;
+    }
     if (kind === "settings") {
       const button = f.querySelector("button");
       button.disabled = true;
@@ -455,13 +573,13 @@ $("#other-page").addEventListener("submit", async (e) => {
       await api("/api/session/open", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ openingCash: Number(data.openingCash) }),
+        body: JSON.stringify({ openingCash: minorUnits(data.openingCash) }),
       });
     if (kind === "close-session") {
       const result = await api("/api/session/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ closingCash: Number(data.closingCash) }),
+        body: JSON.stringify({ closingCash: minorUnits(data.closingCash) }),
       });
       toast(`Session closed · difference ${money(result.difference)}`);
     }
@@ -471,7 +589,7 @@ $("#other-page").addEventListener("submit", async (e) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           direction: data.direction,
-          amount: Number(data.amount),
+          amount: minorUnits(data.amount),
           category: data.category,
           note: data.note,
         }),
@@ -487,7 +605,7 @@ $("#other-page").addEventListener("submit", async (e) => {
             {
               productId: Number(data.productId),
               quantity: Number(data.quantity),
-              unitCost: Number(data.unitCost),
+              unitCost: minorUnits(data.unitCost),
             },
           ],
         }),
@@ -522,6 +640,9 @@ $("#other-page").addEventListener("submit", async (e) => {
     await loadPage();
   } catch (err) {
     toast(err.message);
+  } finally {
+    delete f.dataset.saving;
+    if (submit) submit.disabled = false;
   }
 });
 (async () => {
@@ -547,7 +668,7 @@ $("#other-page").addEventListener("submit", async (e) => {
     $("#user-initials").textContent = currentUser.email
       .slice(0, 2)
       .toUpperCase();
-    renderProducts();
+    await navigate(pageFromURL(), false);
     if (!session) toast("Open a register session before making sales");
   } catch (e) {
     $("#products").innerHTML =

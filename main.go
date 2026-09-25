@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -508,6 +509,11 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, x := range req.Items {
+		var productID int
+		if err = tx.QueryRowContext(r.Context(), `SELECT id FROM products WHERE id=$1 AND active FOR UPDATE`, x.ProductID).Scan(&productID); err != nil {
+			problem(w, 400, "Product is no longer available")
+			return
+		}
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO purchase_items(purchase_id,product_id,quantity,unit_cost) VALUES($1,$2,$3,$4)`, id, x.ProductID, x.Quantity, x.UnitCost)
 		if err == nil {
 			_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock+$1,cost=$2 WHERE id=$3`, x.Quantity, x.UnitCost, x.ProductID)
@@ -567,7 +573,7 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var stock int
-	if err = tx.QueryRowContext(r.Context(), `SELECT stock FROM products WHERE id=$1 FOR UPDATE`, req.ProductID).Scan(&stock); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `SELECT stock FROM products WHERE id=$1 AND active FOR UPDATE`, req.ProductID).Scan(&stock); err != nil {
 		problem(w, 404, "Product not found")
 		return
 	}
@@ -647,7 +653,11 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				problem(w, http.StatusUnauthorized, "Authentication required")
 			} else {
-				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				destination := "/login"
+				if r.URL.Path != "/" {
+					destination += "?next=" + url.QueryEscape(r.URL.Path)
+				}
+				http.Redirect(w, r, destination, http.StatusSeeOther)
 			}
 			return
 		}
@@ -815,6 +825,10 @@ func (s *Server) routes() http.Handler {
 	private.HandleFunc("GET /api/auth/me", s.me)
 	private.Handle("GET /api/settings", requireRoles(s.settings, "superadmin", "admin", "cashier"))
 	private.Handle("PUT /api/settings", requireRoles(s.updateSettings, "superadmin", "admin"))
+	private.Handle("POST /api/products", requireRoles(s.saveProduct, "superadmin", "admin"))
+	private.Handle("PUT /api/products/{id}", requireRoles(s.saveProduct, "superadmin", "admin"))
+	private.Handle("DELETE /api/products/{id}", requireRoles(s.deleteProduct, "superadmin", "admin"))
+	private.Handle("DELETE /api/products", requireRoles(s.deleteAllProducts, "superadmin", "admin"))
 	private.Handle("GET /api/products", requireRoles(s.products, "superadmin", "admin", "cashier"))
 	private.Handle("GET /api/sales", requireRoles(s.sales, "superadmin", "admin", "cashier"))
 	private.Handle("POST /api/checkout", requireRoles(s.checkout, "superadmin", "admin", "cashier"))
@@ -831,6 +845,11 @@ func (s *Server) routes() http.Handler {
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
+	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings"} {
+		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFileFS(w, r, sub, "index.html")
+		})
+	}
 	private.Handle("/", http.FileServer(http.FS(sub)))
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/login", s.login)
