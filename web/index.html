@@ -62,6 +62,7 @@
           ><button class="nav-item" data-page="users" data-roles="superadmin">
             <span data-icon="user"></span>Staff users
           </button>
+        <button class="nav-item hidden" data-page="settings" data-roles="superadmin admin"><span data-icon="settings"></span>Settings</button>
         </nav>
         <div class="mt-auto p-5">
           <div class="rounded-xl bg-paper p-4">
@@ -139,6 +140,7 @@
           ><button class="category" data-page="users" data-roles="superadmin">
             Staff
           </button>
+        <button class="category hidden" data-page="settings" data-roles="superadmin admin">Settings</button>
         </nav>
         <div id="pos-page" class="flex flex-col xl:flex-row">
           <main class="min-w-0 flex-1 p-5 xl:p-8">
@@ -247,18 +249,18 @@
             ></div>
             <div class="border-t border-dashed border-gray-200 pt-5">
               <div class="mb-3 flex justify-between text-xs text-gray-500">
-                <span>Subtotal</span><span id="subtotal">$0.00</span>
+                <span>Subtotal</span><span id="subtotal">—</span>
               </div>
               <div class="mb-5 flex justify-between text-xs text-gray-500">
                 <span>Tax <span class="text-gray-400">(0%)</span></span
-                ><span>$0.00</span>
+                ><span id="tax">—</span>
               </div>
               <div
                 class="flex items-center justify-between border-t border-gray-100 pt-4"
               >
                 <span class="text-sm font-semibold">Total amount</span
                 ><span id="total" class="text-2xl font-semibold tracking-tight"
-                  >$0.00</span
+                  >—</span
                 >
               </div>
               <p class="mb-2 mt-5 text-[10px] font-medium text-gray-400">

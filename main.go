@@ -68,7 +68,10 @@ type contextKey string
 
 const userContextKey contextKey = "user"
 
-type Server struct{ db *sql.DB }
+type Server struct {
+	db            *sql.DB
+	secureCookies bool
+}
 
 func openDB(ctx context.Context, url string) (*sql.DB, error) {
 	db, err := sql.Open("pgx", url)
@@ -82,11 +85,7 @@ func openDB(ctx context.Context, url string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
-	m, err := assets.ReadFile("migrations/001_init.sql")
-	if err == nil {
-		_, err = db.ExecContext(ctx, string(m))
-	}
-	if err != nil {
+	if err = runMigrations(ctx, db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("run migration: %w", err)
 	}
@@ -95,6 +94,51 @@ func openDB(ctx context.Context, url string) (*sql.DB, error) {
 		return nil, fmt.Errorf("create superadmin: %w", err)
 	}
 	return db, nil
+}
+func runMigrations(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY,applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
+		return err
+	}
+	entries, err := fs.ReadDir(assets, "migrations")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		body, err := assets.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(20260925)`); err != nil {
+			tx.Rollback()
+			return err
+		}
+		var applied bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name=$1)`, entry.Name()).Scan(&applied); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if !applied {
+			if _, err = tx.ExecContext(ctx, string(body)); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("%s: %w", entry.Name(), err)
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO schema_migrations(name) VALUES($1)`, entry.Name()); err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func ensureSuperadmin(ctx context.Context, db *sql.DB) error {
 	const email = "janon@lkprofessionals.com"
@@ -134,6 +178,59 @@ func (s *Server) activeSession(ctx context.Context, q interface {
 	err := q.QueryRowContext(ctx, `SELECT id,opened_at,closed_at,opening_cash,closing_cash,status,opening_cash+COALESCE((SELECT SUM(total) FROM sales WHERE session_id=register_sessions.id AND payment='cash'),0)+COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM petty_cash_entries WHERE session_id=register_sessions.id),0) FROM register_sessions WHERE status='open' ORDER BY id DESC LIMIT 1`).Scan(&x.ID, &x.OpenedAt, &x.ClosedAt, &x.OpeningCash, &x.ClosingCash, &x.Status, &x.ExpectedCash)
 	return x, err
 }
+
+// Monetary values remain integer hundredths; supported currencies use two decimals.
+type Currency struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
+var supportedCurrencies = []Currency{
+	{"USD", "US Dollar"}, {"LKR", "Sri Lankan Rupee"}, {"INR", "Indian Rupee"},
+	{"EUR", "Euro"}, {"GBP", "British Pound"}, {"AUD", "Australian Dollar"},
+	{"CAD", "Canadian Dollar"}, {"SGD", "Singapore Dollar"},
+	{"AED", "UAE Dirham"}, {"SAR", "Saudi Riyal"},
+}
+
+type Settings struct {
+	Currency   string     `json:"currency"`
+	Currencies []Currency `json:"currencies"`
+}
+
+func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	var currency string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT currency FROM store_settings WHERE id=1`).Scan(&currency); err != nil {
+		problem(w, 500, "Could not load settings")
+		return
+	}
+	respond(w, 200, Settings{currency, supportedCurrencies})
+}
+
+func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Currency string `json:"currency"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	valid := false
+	for _, currency := range supportedCurrencies {
+		if currency.Code == req.Currency {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		problem(w, 400, "Choose a supported currency")
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(), `UPDATE store_settings SET currency=$1 WHERE id=1`, req.Currency); err != nil {
+		problem(w, 500, "Could not save settings")
+		return
+	}
+	respond(w, 200, Settings{req.Currency, supportedCurrencies})
+}
+
 func (s *Server) products(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,category,price,cost,stock,reorder_level,art,color FROM products WHERE active ORDER BY id`)
 	if err != nil {
@@ -233,7 +330,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	created := time.Now()
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment) VALUES($1,$2,$3) RETURNING id,created_at`, session.ID, total, req.Payment).Scan(&id, &created); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by) VALUES($1,$2,$3,$4) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID).Scan(&id, &created); err != nil {
 		problem(w, 500, "Could not save sale")
 		return
 	}
@@ -244,7 +341,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 			_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock-$1 WHERE id=$2`, x.Quantity, x.ProductID)
 		}
 		if err == nil {
-			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,reference_type,reference_id,note) VALUES($1,'sale',$2,'sale',$3,'POS sale')`, x.ProductID, -x.Quantity, id)
+			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,reference_type,reference_id,note,created_by) VALUES($1,'sale',$2,'sale',$3,'POS sale',$4)`, x.ProductID, -x.Quantity, id, principal(r).ID)
 		}
 		if err != nil {
 			problem(w, 500, "Could not update inventory")
@@ -285,7 +382,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasSuffix(r.URL.Path, "/open") {
 		var id int64
-		err := s.db.QueryRowContext(r.Context(), `INSERT INTO register_sessions(opening_cash) SELECT $1 WHERE NOT EXISTS(SELECT 1 FROM register_sessions WHERE status='open') RETURNING id`, req.OpeningCash).Scan(&id)
+		err := s.db.QueryRowContext(r.Context(), `INSERT INTO register_sessions(opening_cash,opened_by) SELECT $1,$2 WHERE NOT EXISTS(SELECT 1 FROM register_sessions WHERE status='open') RETURNING id`, req.OpeningCash, principal(r).ID).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			problem(w, 409, "A register session is already open")
 			return
@@ -302,7 +399,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		problem(w, 409, "No register session is open")
 		return
 	}
-	_, err = s.db.ExecContext(r.Context(), `UPDATE register_sessions SET status='closed',closed_at=now(),closing_cash=$1 WHERE id=$2`, req.ClosingCash, x.ID)
+	_, err = s.db.ExecContext(r.Context(), `UPDATE register_sessions SET status='closed',closed_at=now(),closing_cash=$1,closed_by=$2 WHERE id=$3`, req.ClosingCash, principal(r).ID, x.ID)
 	if err != nil {
 		problem(w, 500, "Could not close session")
 		return
@@ -350,7 +447,7 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id int64
-	err = s.db.QueryRowContext(r.Context(), `INSERT INTO petty_cash_entries(session_id,direction,amount,category,note) VALUES($1,$2,$3,$4,$5) RETURNING id`, x.ID, req.Direction, req.Amount, req.Category, req.Note).Scan(&id)
+	err = s.db.QueryRowContext(r.Context(), `INSERT INTO petty_cash_entries(session_id,direction,amount,category,note,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, x.ID, req.Direction, req.Amount, req.Category, req.Note, principal(r).ID).Scan(&id)
 	if err != nil {
 		problem(w, 500, "Could not save entry")
 		return
@@ -406,7 +503,7 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 		total += x.Quantity * x.UnitCost
 	}
 	var id int64
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO purchases(supplier,invoice_number,total,status) VALUES($1,$2,$3,'received') RETURNING id`, req.Supplier, req.InvoiceNumber, total).Scan(&id); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO purchases(supplier,invoice_number,total,status,created_by) VALUES($1,$2,$3,'received',$4) RETURNING id`, req.Supplier, req.InvoiceNumber, total, principal(r).ID).Scan(&id); err != nil {
 		problem(w, 500, "Could not save purchase")
 		return
 	}
@@ -416,7 +513,7 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 			_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock+$1,cost=$2 WHERE id=$3`, x.Quantity, x.UnitCost, x.ProductID)
 		}
 		if err == nil {
-			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,reference_type,reference_id,note) VALUES($1,'purchase',$2,'purchase',$3,'Stock received')`, x.ProductID, x.Quantity, id)
+			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,reference_type,reference_id,note,created_by) VALUES($1,'purchase',$2,'purchase',$3,'Stock received',$4)`, x.ProductID, x.Quantity, id, principal(r).ID)
 		}
 		if err != nil {
 			problem(w, 400, "Invalid purchase product")
@@ -480,7 +577,7 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock+$1 WHERE id=$2`, req.Quantity, req.ProductID)
 	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,note) VALUES($1,'adjustment',$2,$3)`, req.ProductID, req.Quantity, req.Note)
+		_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,note,created_by) VALUES($1,'adjustment',$2,$3,$4)`, req.ProductID, req.Quantity, req.Note, principal(r).ID)
 	}
 	if err != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not adjust inventory")
@@ -491,6 +588,9 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 func tokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+func (s *Server) cookieSecure(r *http.Request) bool {
+	return s.secureCookies || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -518,14 +618,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not create session")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "counter_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: 12 * 60 * 60})
+	http.SetCookie(w, &http.Cookie{Name: "counter_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: s.cookieSecure(r), MaxAge: 12 * 60 * 60})
 	respond(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie("counter_session"); err == nil {
 		_, _ = s.db.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE token_hash=$1`, tokenHash(c.Value))
 	}
-	http.SetCookie(w, &http.Cookie{Name: "counter_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "counter_session", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: s.cookieSecure(r), MaxAge: -1})
 	respond(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) currentUser(r *http.Request) (*User, error) {
@@ -574,6 +674,15 @@ func requireRoles(next http.HandlerFunc, roles ...string) http.Handler {
 	})
 }
 func (s *Server) me(w http.ResponseWriter, r *http.Request) { respond(w, 200, principal(r)) }
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.db.PingContext(ctx); err != nil {
+		problem(w, http.StatusServiceUnavailable, "database unavailable")
+		return
+	}
+	respond(w, 200, map[string]string{"status": "ok"})
+}
 func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		rows, err := s.db.QueryContext(r.Context(), `SELECT id,email,role,active,created_at FROM users ORDER BY created_at`)
@@ -704,6 +813,8 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() http.Handler {
 	private := http.NewServeMux()
 	private.HandleFunc("GET /api/auth/me", s.me)
+	private.Handle("GET /api/settings", requireRoles(s.settings, "superadmin", "admin", "cashier"))
+	private.Handle("PUT /api/settings", requireRoles(s.updateSettings, "superadmin", "admin"))
 	private.Handle("GET /api/products", requireRoles(s.products, "superadmin", "admin", "cashier"))
 	private.Handle("GET /api/sales", requireRoles(s.sales, "superadmin", "admin", "cashier"))
 	private.Handle("POST /api/checkout", requireRoles(s.checkout, "superadmin", "admin", "cashier"))
@@ -724,6 +835,7 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/login", s.login)
 	mux.HandleFunc("POST /api/auth/logout", s.logout)
+	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /styles.css", func(w http.ResponseWriter, r *http.Request) { http.ServeFileFS(w, r, sub, "styles.css") })
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.currentUser(r); err == nil {
@@ -753,6 +865,7 @@ func main() {
 	if strings.HasPrefix(display, ":") {
 		display = "localhost" + display
 	}
+	secureCookies := strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true")
 	log.Printf("Counter POS running at http://%s", display)
-	log.Fatal((&http.Server{Addr: addr, Handler: (&Server{db}).routes(), ReadHeaderTimeout: 5 * time.Second}).ListenAndServe())
+	log.Fatal((&http.Server{Addr: addr, Handler: (&Server{db, secureCookies}).routes(), ReadHeaderTimeout: 5 * time.Second}).ListenAndServe())
 }

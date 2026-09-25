@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +50,15 @@ func TestRoleChecks(t *testing.T) {
 	}
 }
 
+func TestSecureCookieBehindProxy(t *testing.T) {
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+	r.Header.Set("X-Forwarded-Proto", "https")
+	if !s.cookieSecure(r) {
+		t.Fatal("HTTPS proxy requests must receive secure cookies")
+	}
+}
+
 func TestPostgresMigration(t *testing.T) {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -64,5 +75,87 @@ func TestPostgresMigration(t *testing.T) {
 	}
 	if tables != 6 {
 		t.Fatalf("found %d core tables, want 6", tables)
+	}
+	var migrations int
+	if err = db.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&migrations); err != nil {
+		t.Fatal(err)
+	}
+	if migrations < 2 {
+		t.Fatalf("found %d migrations, want at least 2", migrations)
+	}
+	dbAgain, err := openDB(context.Background(), url)
+	if err != nil {
+		t.Fatalf("rerun migrations: %v", err)
+	}
+	dbAgain.Close()
+	var auditColumns int
+	if err = db.QueryRow(`SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='sales' AND column_name='created_by') OR (table_name='register_sessions' AND column_name IN ('opened_by','closed_by')) OR (table_name='purchases' AND column_name='created_by') OR (table_name='petty_cash_entries' AND column_name='created_by') OR (table_name='inventory_movements' AND column_name='created_by'))`).Scan(&auditColumns); err != nil {
+		t.Fatal(err)
+	}
+	if auditColumns != 6 {
+		t.Fatalf("found %d audit columns, want 6", auditColumns)
+	}
+	w := httptest.NewRecorder()
+	(&Server{db: db}).routes().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("health status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSettingsValidationAndPermissions(t *testing.T) {
+	s := &Server{}
+	for _, body := range []string{`{"currency":"XYZ"}`, `{"currency":""}`, `{"currency":"usd"}`, `{"currency":123}`, `{"currency":"USD","extra":true}`} {
+		w := httptest.NewRecorder()
+		s.updateSettings(w, httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body)))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body=%s: status=%d, want 400", body, w.Code)
+		}
+	}
+	r := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"currency":"LKR"}`))
+	r = r.WithContext(context.WithValue(r.Context(), userContextKey, &User{Role: "cashier"}))
+	w := httptest.NewRecorder()
+	requireRoles(s.updateSettings, "superadmin", "admin").ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cashier settings update: status=%d, want 403", w.Code)
+	}
+}
+
+func TestSettingsPersistence(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	db, err := openDB(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Server{db: db}
+	var original string
+	if err := db.QueryRow("SELECT currency FROM store_settings WHERE id=1").Scan(&original); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Exec("UPDATE store_settings SET currency=$1 WHERE id=1", original)
+	for _, currency := range supportedCurrencies {
+		w := httptest.NewRecorder()
+		s.updateSettings(w, httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"currency":"`+currency.Code+`"}`)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("save %s: %d %s", currency.Code, w.Code, w.Body.String())
+		}
+		// Reopening runs startup migrations again: saved preferences must survive.
+		reopened, err := openDB(context.Background(), url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w = httptest.NewRecorder()
+		(&Server{db: reopened}).settings(w, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+		reopened.Close()
+		var got Settings
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != http.StatusOK || got.Currency != currency.Code || len(got.Currencies) != len(supportedCurrencies) {
+			t.Fatalf("read saved %s: status=%d settings=%+v", currency.Code, w.Code, got)
+		}
 	}
 }

@@ -1,9 +1,16 @@
 const $ = (s) => document.querySelector(s);
-const money = (n) =>
-  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(
-    n / 100,
-  );
+let settings = { currency: "USD", currencies: [] };
+let moneyFormatter;
+function applySettings(value) {
+  settings = value;
+  moneyFormatter = new Intl.NumberFormat("en-US", {
+    style: "currency", currency: settings.currency,
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+const money = (n) => moneyFormatter ? moneyFormatter.format(n / 100) : "—";
 const icons = {
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/><circle cx="12" cy="12" r="8"/>',
   logo: '<path d="M5 7h14v10H5zM8 4v3m8-3v3M8 11h8m-8 3h4"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   receipt: '<path d="M6 3l3 2 3-2 3 2 3-2v18l-3-2-3 2-3-2-3 2zM9 9h6m-6 4h6"/>',
@@ -127,7 +134,8 @@ function renderCart() {
     `<div class="flex h-full min-h-52 flex-col items-center justify-center text-gray-300"><div class="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-gray-50">${icon("receipt")}</div><p class="text-sm font-medium text-gray-500">A good day starts here</p><p class="mt-2 text-[11px] text-gray-400">Choose a product to start an order.</p></div>`;
   $("#cart-count").textContent = `(${count})`;
   $("#subtotal").textContent = $("#total").textContent = money(total);
-  $("#checkout").disabled = !count || busy;
+  $("#tax").textContent = money(0);
+  $("#checkout").disabled = !count || busy || !moneyFormatter;
 }
 function add(id, delta = 1) {
   if (busy) return;
@@ -150,7 +158,21 @@ function renderOther() {
   let title = "",
     desc = "",
     body = "";
-  if (page === "users") {
+  if (page === "settings") {
+    title = "Settings";
+    desc = "Manage preferences for this store.";
+    body = `<form data-form="settings" class="max-w-md rounded-xl border bg-white p-5">
+      <h2 class="font-semibold">Store currency</h2>
+      <p class="mt-2 text-xs leading-5 text-gray-500">Used for prices, checkout, receipts, and all history. Changing currency keeps existing amounts the same; no exchange-rate conversion is applied.</p>
+      <label class="mt-5 block text-xs font-medium text-gray-600">Currency
+        <select name="currency" required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3">
+          ${settings.currencies.map((c) => `<option value="${c.code}" ${c.code === settings.currency ? "selected" : ""}>${c.code} — ${c.name}</option>`).join("")}
+        </select>
+      </label>
+      <p class="mt-3 text-xs text-gray-500">Current format: ${money(123456)}</p>
+      <button class="mt-5 rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">Save settings</button>
+    </form>`;
+  } else if (page === "users") {
     title = "Staff users";
     desc =
       "Create staff accounts and control their access. Only superadmins can manage users.";
@@ -254,6 +276,9 @@ function renderOther() {
 }
 async function loadPage() {
   try {
+    applySettings(await api("/api/settings"));
+    renderProducts();
+    renderCart();
     session = await api("/api/session");
     if (page === "sales") sales = await api("/api/sales");
     if (page === "inventory") movements = await api("/api/inventory/movements");
@@ -277,6 +302,7 @@ async function navigate(next) {
     purchases: "Purchases",
     petty: "Petty cash",
     users: "Staff users",
+    settings: "Settings",
   }[page];
   document
     .querySelectorAll("[data-page]")
@@ -407,6 +433,24 @@ $("#other-page").addEventListener("submit", async (e) => {
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
   try {
+    if (kind === "settings") {
+      const button = f.querySelector("button");
+      button.disabled = true;
+      try {
+        applySettings(await api("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ currency: data.currency }),
+        }));
+        renderProducts();
+        renderCart();
+        renderOther();
+        toast("Currency settings saved");
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
     if (kind === "open-session")
       await api("/api/session/open", {
         method: "POST",
@@ -483,11 +527,15 @@ $("#other-page").addEventListener("submit", async (e) => {
 (async () => {
   renderCart();
   try {
-    [products, session, currentUser] = await Promise.all([
+    const loaded = await Promise.all([
       api("/api/products"),
       api("/api/session"),
       api("/api/auth/me"),
+      api("/api/settings"),
     ]);
+    [products, session, currentUser] = loaded;
+    applySettings(loaded[3]);
+    renderCart();
     document.querySelectorAll("[data-roles]").forEach((el) => {
       el.classList.toggle(
         "hidden",
