@@ -64,3 +64,9 @@ The store uses one shared open register session. Every sale is linked to that se
 Register session history shows opening/closing staff and times, sale counts and totals, counted cash, expected cash at close, and differences. New sales and session actions save staff email snapshots alongside user IDs. Legacy records without staff attribution display “Not recorded”; attribution is not invented. Closing cash expectations from before this feature are also shown as not recorded.
 
 Checkout, petty cash, sale deletion, and session closing lock the register row during their transactions. A concurrent sale either commits before closing and is included in closing totals, or is rejected after the session closes. The browser also sends the reviewed session ID to reject checkout against a replaced session. Expected cash at close is preserved even if a sale is subsequently deleted.
+
+## Categories
+
+Open **Products → Manage categories** to create, view, rename, and delete categories. Admins and superadmins can manage categories; cashiers can read them. Product forms select a saved category. Renames update assigned products and POS filters, and duplicate names are rejected without regard to case.
+
+Existing category names are imported on upgrade, including categories on archived products. A category with active products cannot be deleted: reassign or delete those products first. Category deletion requires confirmation in the UI and keeps archived products and sales records intact. Category changes preserve any unfinished product form.

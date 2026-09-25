@@ -82,6 +82,20 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	if strings.TrimSpace(request("GET", "/api/products", "", 200).Body.String()) != "[]" {
 		t.Fatal("new catalogs must be empty")
 	}
+	request("POST", "/api/categories", `{"name":"   "}`, 400)
+	cw := request("POST", "/api/categories", `{"name":"Custom bakery"}`, 201)
+	var originalCategory Category
+	if err := json.Unmarshal(cw.Body.Bytes(), &originalCategory); err != nil {
+		t.Fatal(err)
+	}
+	categoryPath := fmt.Sprintf("/api/categories/%d", originalCategory.ID)
+	request("POST", "/api/categories", `{"name":" custom BAKERY "}`, 409)
+	cw = request("POST", "/api/categories", `{"name":"Other"}`, 201)
+	var otherCategory Category
+	if err := json.Unmarshal(cw.Body.Bytes(), &otherCategory); err != nil {
+		t.Fatal(err)
+	}
+	request("PUT", fmt.Sprintf("/api/categories/%d", otherCategory.ID), `{"name":"Custom bakery"}`, 409)
 	body := `{"name":"Bread & butter","category":"Custom bakery","price":12550,"cost":7550,"stock":8,"reorderLevel":2,"art":"box","color":"#aabbcc"}`
 	w := request("POST", "/api/products", body, 201)
 	var created struct{ ID int64 }
@@ -94,6 +108,17 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	if stock != 8 || movements != 1 {
 		t.Fatalf("opening stock=%d movements=%d", stock, movements)
 	}
+	request("DELETE", categoryPath, "", 409)
+	request("PUT", categoryPath, `{"name":"Renamed bakery"}`, 200)
+	var catalog []Product
+	if err := json.Unmarshal(request("GET", "/api/products", "", 200).Body.Bytes(), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog) != 1 || catalog[0].Category != "Renamed bakery" || catalog[0].CategoryID != originalCategory.ID {
+		t.Fatalf("rename did not propagate: %+v", catalog)
+	}
+	request("PUT", categoryPath, `{"name":"Custom bakery"}`, 200)
+	request("POST", "/api/products", strings.ReplaceAll(body, "Custom bakery", "Missing category"), 400)
 	path := fmt.Sprintf("/api/products/%d", created.ID)
 	request("PUT", path, strings.ReplaceAll(body, `"stock":8`, `"stock":0`), 200)
 	request("PUT", path, body, 400)
@@ -172,6 +197,19 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	if strings.TrimSpace(request("GET", "/api/products", "", 200).Body.String()) != "[]" {
 		t.Fatal("deleted products returned")
 	}
+	request("DELETE", categoryPath, "", 200)
+	request("DELETE", categoryPath, "", 404)
+	request("POST", "/api/products", body, 400)
+	request("DELETE", fmt.Sprintf("/api/categories/%d", otherCategory.ID), "", 200)
+	if strings.TrimSpace(request("GET", "/api/categories", "", 200).Body.String()) != "[]" {
+		t.Fatal("deleted categories returned")
+	}
+	if err = runMigrations(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(request("GET", "/api/categories", "", 200).Body.String()) != "[]" {
+		t.Fatal("restart recreated categories")
+	}
 	if _, err = db.Exec(`UPDATE users SET role='cashier' WHERE id=$1`, userID); err != nil {
 		t.Fatal(err)
 	}
@@ -181,4 +219,8 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	request("DELETE", "/api/products", `{"confirmation":"DELETE ALL PRODUCTS"}`, 403)
 	request("GET", "/api/products", "", 200)
 	request("DELETE", salePath, deleteBody, 403)
+	request("GET", "/api/categories", "", 200)
+	request("POST", "/api/categories", `{"name":"Denied"}`, 403)
+	request("PUT", categoryPath, `{"name":"Denied"}`, 403)
+	request("DELETE", categoryPath, "", 403)
 }

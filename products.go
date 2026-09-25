@@ -14,6 +14,7 @@ var productColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 type productInput struct {
 	Name         string `json:"name"`
 	Category     string `json:"category"`
+	CategoryID   int64  `json:"categoryId"`
 	Price        int    `json:"price"`
 	Cost         int    `json:"cost"`
 	Stock        int    `json:"stock"`
@@ -37,7 +38,7 @@ func (p *productInput) validate() bool {
 			artOK = true
 		}
 	}
-	return p.Name != "" && len(p.Name) <= 200 && p.Category != "" && len(p.Category) <= 100 &&
+	return p.Name != "" && len(p.Name) <= 200 && (p.CategoryID > 0 || (p.Category != "" && len(p.Category) <= 100)) && p.CategoryID >= 0 &&
 		p.Price >= 0 && p.Price <= 10000000 && p.Cost >= 0 && p.Cost <= 10000000 &&
 		p.Stock >= 0 && p.Stock <= 1000000 && p.ReorderLevel >= 0 && p.ReorderLevel <= 1000000 &&
 		artOK && productColor.MatchString(p.Color)
@@ -58,10 +59,24 @@ func (s *Server) saveProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	// Lock the category until the product is saved so renames and deletion cannot race.
+	if p.CategoryID > 0 {
+		err = tx.QueryRowContext(r.Context(), `SELECT id,name FROM categories WHERE id=$1 FOR SHARE`, p.CategoryID).Scan(&p.CategoryID, &p.Category)
+	} else {
+		err = tx.QueryRowContext(r.Context(), `SELECT id,name FROM categories WHERE lower(name)=lower($1) FOR SHARE`, p.Category).Scan(&p.CategoryID, &p.Category)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		problem(w, 400, "Choose an existing category or create one in Products")
+		return
+	}
+	if err != nil {
+		problem(w, 500, "Could not read category")
+		return
+	}
 	var id int64
 	if r.Method == http.MethodPost {
-		err = tx.QueryRowContext(r.Context(), `INSERT INTO products(name,category,price,cost,stock,reorder_level,art,color) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-			p.Name, p.Category, p.Price, p.Cost, p.Stock, p.ReorderLevel, p.Art, p.Color).Scan(&id)
+		err = tx.QueryRowContext(r.Context(), `INSERT INTO products(name,category,price,cost,stock,reorder_level,art,color,category_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+			p.Name, p.Category, p.Price, p.Cost, p.Stock, p.ReorderLevel, p.Art, p.Color, p.CategoryID).Scan(&id)
 		if err == nil && p.Stock > 0 {
 			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,note,created_by) VALUES($1,'opening',$2,'Opening stock',$3)`, id, p.Stock, principal(r).ID)
 		}
@@ -76,8 +91,8 @@ func (s *Server) saveProduct(w http.ResponseWriter, r *http.Request) {
 			problem(w, 400, "Use inventory adjustments to change stock")
 			return
 		}
-		err = tx.QueryRowContext(r.Context(), `UPDATE products SET name=$1,category=$2,price=$3,cost=$4,reorder_level=$5,art=$6,color=$7 WHERE id=$8 AND active RETURNING id`,
-			p.Name, p.Category, p.Price, p.Cost, p.ReorderLevel, p.Art, p.Color, id).Scan(&id)
+		err = tx.QueryRowContext(r.Context(), `UPDATE products SET name=$1,category=$2,price=$3,cost=$4,reorder_level=$5,art=$6,color=$7,category_id=$9 WHERE id=$8 AND active RETURNING id`,
+			p.Name, p.Category, p.Price, p.Cost, p.ReorderLevel, p.Art, p.Color, id, p.CategoryID).Scan(&id)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		problem(w, 404, "Product not found")

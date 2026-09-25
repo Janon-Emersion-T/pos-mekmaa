@@ -64,6 +64,7 @@ function art(p) {
   return `<svg viewBox="0 0 200 170" role="img" aria-label="${escapeHTML(p.name)}">${shape}</svg>`;
 }
 let products = [],
+  productCategories = [],
   sales = [],
   purchases = [],
   petty = [],
@@ -79,6 +80,7 @@ let products = [],
   busy = false,
   service = "Dine in";
 let editingProduct = null;
+let editingCategory = null;
 let pageRequest = 0;
 const pageTitles = {
   pos: "Point of sale", products: "Products", session: "Register session",
@@ -196,13 +198,43 @@ function minorUnits(value) {
   if (!Number.isSafeInteger(n) || n > 10000000) throw Error("Amount is too large");
   return n;
 }
+function categoryManagement() {
+  const selected = productCategories.find((c) => c.id === editingCategory);
+  return `<details id="category-manager" class="mb-6 rounded-xl border bg-white p-5" ${!productCategories.length || selected ? "open" : ""}>
+    <summary class="cursor-pointer font-semibold">Manage categories (${productCategories.length})</summary>
+    <p class="mt-3 text-xs leading-5 text-gray-500">Create categories for your products. Renaming updates every assigned product. Move or delete active products before deleting their category.</p>
+    <form data-form="category" data-id="${selected?.id || ""}" class="my-6 flex flex-col gap-3 sm:flex-row sm:items-end">
+      <label class="flex-1 text-xs font-medium text-gray-600">Category name<input name="name" value="${escapeHTML(selected?.name || "")}" required maxlength="100" class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3" placeholder="e.g. Beverages"></label>
+      <button class="h-11 rounded-lg bg-ink px-5 text-sm text-white disabled:opacity-50">${selected ? "Save category" : "Add category"}</button>
+      ${selected ? '<button type="button" data-category-cancel class="h-11 px-3 text-sm text-gray-500">Cancel</button>' : ""}
+    </form>
+    ${table(["Category","Active products","Actions"],productCategories.map((c) => `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(c.name)}</td><td class="p-4">${c.productCount}</td><td class="p-4"><button data-category-edit="${c.id}" class="mr-3 text-orange-600">Edit</button><button data-category-delete="${c.id}" class="text-red-600 disabled:opacity-50" ${c.productCount ? 'disabled title="Move or delete active products first"' : ""}>Delete</button></td></tr>`).join(""))}
+  </details>`;
+}
+function productDraft() {
+  const form = $('#other-page [data-form="product"]');
+  return form ? Object.fromEntries(new FormData(form)) : null;
+}
+function restoreProductDraft(draft) {
+  const form = $('#other-page [data-form="product"]');
+  if (!form || !draft) return;
+  for (const [name,value] of Object.entries(draft)) {
+    const field = form.elements.namedItem(name);
+    if (field) field.value = value;
+  }
+}
+async function refreshCategories(draft) {
+  await loadPage();
+  restoreProductDraft(draft);
+  if ($("#category-manager")) $("#category-manager").open = true;
+}
 function productManagement() {
   const p = products.find((p) => p.id === editingProduct);
   const appearances = ["box","coffee","iced","matcha","tea","croissant","cookie","toast","sandwich","cake","roll"];
-  return `<form data-form="product" data-id="${p?.id || ""}" class="mb-6 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3">
+  return categoryManagement() + `<form data-form="product" data-id="${p?.id || ""}" class="mb-6 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3">
     <h2 class="font-semibold sm:col-span-3">${p ? "Edit product" : "Add product"}</h2>
     ${field("Product name", "name", "text", p?.name || "")}
-    ${field("Category", "category", "text", p?.category || "")}
+    <label class="block text-xs font-medium text-gray-600">Category<select name="categoryId" required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3"><option value="">${productCategories.length ? "Select category" : "Create a category above first"}</option>${productCategories.map((c) => `<option value="${c.id}" ${p?.categoryId === c.id ? "selected" : ""}>${escapeHTML(c.name)}</option>`).join("")}</select></label>
     ${amountField("Selling price", "price", p ? (p.price / 100).toFixed(2) : "")}
     ${amountField("Cost", "cost", p ? (p.cost / 100).toFixed(2) : "0.00")}
     ${p ? '<p class="text-xs text-gray-500">Change stock through Inventory adjustments.</p>' : field("Opening stock", "stock", "number", "0")}
@@ -356,13 +388,15 @@ async function loadPage() {
   const request = ++pageRequest, requestedPage = page;
   try {
     const endpoints = { session: "/api/sessions", sales: "/api/sales" + location.search, inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
-    const [savedSettings, savedProducts, savedSession, records] = await Promise.all([
+    const [savedSettings, savedProducts, savedSession, records, savedCategories] = await Promise.all([
       api("/api/settings"), api("/api/products"), api("/api/session"),
       endpoints[requestedPage] ? api(endpoints[requestedPage]) : Promise.resolve(null),
+      api("/api/categories"),
     ]);
     if (request !== pageRequest) return;
     applySettings(savedSettings);
     products = savedProducts;
+    productCategories = savedCategories;
     session = savedSession;
     if (requestedPage === "sales") sales = records;
     if (requestedPage === "session") sessionHistory = records;
@@ -397,15 +431,15 @@ async function navigate(next, push = true, query = "") {
   if (page !== "pos") $("#other-page").innerHTML = '<p class="text-sm text-gray-500">Loading…</p>';
   await loadPage();
 }
-function confirmAction({ title, description, details, label, deletion = false }) {
+function confirmAction({ title, description, details, label, deletion = false, danger = false }) {
   const dialog = $("#confirm-dialog");
   if (dialog.open) return Promise.resolve(null);
   $("#confirm-title").textContent = title;
   $("#confirm-description").textContent = description;
   $("#confirm-details").innerHTML = details;
   $("#confirm-accept").textContent = label;
-  $("#confirm-accept").classList.toggle("bg-red-600", deletion);
-  $("#confirm-accept").classList.toggle("bg-ink", !deletion);
+  $("#confirm-accept").classList.toggle("bg-red-600", deletion || danger);
+  $("#confirm-accept").classList.toggle("bg-ink", !deletion && !danger);
   $("#confirm-reason-label").classList.toggle("hidden", !deletion);
   $("#confirm-reason").required = deletion;
   $("#confirm-reason").value = "";
@@ -468,6 +502,36 @@ document.addEventListener("click", async (e) => {
       toast(`Sale #${sale.id} deleted. Stock and register totals updated.`);
     } catch (err) { toast(err.message); }
     finally { deleteSale.disabled = false; deleteSale.textContent = "Delete sale"; }
+  }
+  const categoryEdit = e.target.closest("[data-category-edit]");
+  if (categoryEdit || e.target.closest("[data-category-cancel]")) {
+    const draft = productDraft();
+    editingCategory = categoryEdit ? Number(categoryEdit.dataset.categoryEdit) : null;
+    renderOther();
+    restoreProductDraft(draft);
+    $("#category-manager").open = true;
+    $('#other-page [data-form="category"] input').focus();
+  }
+  const categoryDelete = e.target.closest("[data-category-delete]");
+  if (categoryDelete && !categoryDelete.disabled) {
+    const selected = productCategories.find((c) => c.id === Number(categoryDelete.dataset.categoryDelete));
+    if (!selected) return;
+    categoryDelete.disabled = true;
+    try {
+      const confirmed = await confirmAction({
+        title: "Delete category?",
+        description: "This removes the category from the product selector. Existing sales and archived products are kept.",
+        details: `<p class="font-semibold">${escapeHTML(selected.name)}</p>`,
+        label: "Delete category", danger: true,
+      });
+      if (!confirmed) return;
+      const draft = productDraft();
+      await api(`/api/categories/${selected.id}`, { method: "DELETE" });
+      if (editingCategory === selected.id) editingCategory = null;
+      await refreshCategories(draft);
+      toast("Category deleted");
+    } catch (err) { toast(err.message); }
+    finally { categoryDelete.disabled = false; }
   }
   const edit = e.target.closest("[data-edit-product]");
   if (edit) { editingProduct = Number(edit.dataset.editProduct); renderOther(); }
@@ -625,12 +689,25 @@ $("#other-page").addEventListener("submit", async (e) => {
   const submit = f.querySelector('button:not([type="button"])');
   if (submit) submit.disabled = true;
   try {
+    if (kind === "category") {
+      const draft = productDraft();
+      const result = await api(f.dataset.id ? `/api/categories/${f.dataset.id}` : "/api/categories", {
+        method: f.dataset.id ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: data.name }),
+      });
+      editingCategory = null;
+      if (draft && !draft.categoryId) draft.categoryId = String(result.id);
+      await refreshCategories(draft);
+      toast(f.dataset.id ? "Category updated" : "Category added");
+      return;
+    }
     if (kind === "product") {
       await api(f.dataset.id ? `/api/products/${f.dataset.id}` : "/api/products", {
         method: f.dataset.id ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: data.name, category: data.category,
+          name: data.name, categoryId: Number(data.categoryId),
           price: minorUnits(data.price), cost: minorUnits(data.cost),
           stock: f.dataset.id ? 0 : Number(data.stock),
           reorderLevel: Number(data.reorderLevel), art: data.art, color: data.color,

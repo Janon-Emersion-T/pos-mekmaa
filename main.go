@@ -29,6 +29,7 @@ type Product struct {
 	ID           int    `json:"id"`
 	Name         string `json:"name"`
 	Category     string `json:"category"`
+	CategoryID   int64  `json:"categoryId"`
 	Price        int    `json:"price"`
 	Cost         int    `json:"cost"`
 	Stock        int    `json:"stock"`
@@ -242,7 +243,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) products(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,category,price,cost,stock,reorder_level,art,color FROM products WHERE active ORDER BY id`)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT id,name,category,price,cost,stock,reorder_level,art,color,COALESCE(category_id,0) FROM products WHERE active ORDER BY id`)
 	if err != nil {
 		problem(w, 500, "Could not load products")
 		return
@@ -251,7 +252,7 @@ func (s *Server) products(w http.ResponseWriter, r *http.Request) {
 	out := []Product{}
 	for rows.Next() {
 		var p Product
-		if rows.Scan(&p.ID, &p.Name, &p.Category, &p.Price, &p.Cost, &p.Stock, &p.ReorderLevel, &p.Art, &p.Color) != nil {
+		if rows.Scan(&p.ID, &p.Name, &p.Category, &p.Price, &p.Cost, &p.Stock, &p.ReorderLevel, &p.Art, &p.Color, &p.CategoryID) != nil {
 			problem(w, 500, "Could not read products")
 			return
 		}
@@ -870,6 +871,10 @@ func (s *Server) routes() http.Handler {
 	private.HandleFunc("GET /api/auth/me", s.me)
 	private.Handle("GET /api/settings", requireRoles(s.settings, "superadmin", "admin", "cashier"))
 	private.Handle("PUT /api/settings", requireRoles(s.updateSettings, "superadmin", "admin"))
+	private.Handle("GET /api/categories", requireRoles(s.categories, "superadmin", "admin", "cashier"))
+	private.Handle("POST /api/categories", requireRoles(s.saveCategory, "superadmin", "admin"))
+	private.Handle("PUT /api/categories/{id}", requireRoles(s.saveCategory, "superadmin", "admin"))
+	private.Handle("DELETE /api/categories/{id}", requireRoles(s.deleteCategory, "superadmin", "admin"))
 	private.Handle("POST /api/products", requireRoles(s.saveProduct, "superadmin", "admin"))
 	private.Handle("PUT /api/products/{id}", requireRoles(s.saveProduct, "superadmin", "admin"))
 	private.Handle("DELETE /api/products/{id}", requireRoles(s.deleteProduct, "superadmin", "admin"))
