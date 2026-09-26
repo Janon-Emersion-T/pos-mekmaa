@@ -15,10 +15,12 @@ func (s *Server) refundSale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		RequestID string `json:"requestId"`
-		Reason    string `json:"reason"`
-		Confirmed bool   `json:"confirmed"`
-		Items     []struct {
+		RequestID           string `json:"requestId"`
+		Reason              string `json:"reason"`
+		Confirmed           bool   `json:"confirmed"`
+		CreditRefundPayment string `json:"creditRefundPayment,omitempty"`
+		ExpectedOutstanding *int   `json:"expectedOutstanding,omitempty"`
+		Items               []struct {
 			SaleItemID int64 `json:"saleItemId"`
 			Quantity   int   `json:"quantity"`
 			Restock    bool  `json:"restock"`
@@ -28,6 +30,10 @@ func (s *Server) refundSale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Reason = strings.TrimSpace(req.Reason)
+	if req.CreditRefundPayment != "" && req.CreditRefundPayment != "cash" && req.CreditRefundPayment != "card" {
+		problem(w, 400, "Choose cash or card for the paid portion of the return")
+		return
+	}
 	if !req.Confirmed || req.Reason == "" || len(req.Reason) > 500 || len(req.Items) < 1 || len(req.Items) > 100 {
 		problem(w, 400, "Select return quantities, enter a reason, and confirm payment has been refunded")
 		return
@@ -102,7 +108,25 @@ func (s *Server) refundSale(w http.ResponseWriter, r *http.Request) {
 		lines = append(lines, returned{x.SaleItemID, product, x.Quantity, amount, x.Restock})
 	}
 	var id int64
-	err = tx.QueryRowContext(r.Context(), `INSERT INTO refunds(sale_id,session_id,created_by,cashier_email,reason,total,payment,currency) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, saleID, session.ID, principal(r).ID, principal(r).Email, req.Reason, total, payment, currency).Scan(&id)
+	var cashReturned, cardReturned, debtReduction int
+	if payment == "credit" {
+		var outstanding int
+		if tx.QueryRowContext(r.Context(), `SELECT outstanding FROM credit_sale_balances WHERE id=$1`, saleID).Scan(&outstanding) != nil {
+			problem(w, 500, "Could not read customer balance")
+			return
+		}
+		if req.ExpectedOutstanding == nil || *req.ExpectedOutstanding != outstanding {
+			problem(w, 409, "The customer balance has changed. Reopen the return and review the amount to refund")
+			return
+		}
+		debtReduction = min(total, outstanding)
+		if req.CreditRefundPayment == "card" {
+			cardReturned = total - debtReduction
+		} else {
+			cashReturned = total - debtReduction
+		}
+	}
+	err = tx.QueryRowContext(r.Context(), `INSERT INTO refunds(sale_id,session_id,created_by,cashier_email,reason,total,payment,currency,cash_returned,card_returned) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, saleID, session.ID, principal(r).ID, principal(r).Email, req.Reason, total, payment, currency, cashReturned, cardReturned).Scan(&id)
 	if err != nil {
 		problem(w, 500, "Could not record refund")
 		return
@@ -120,7 +144,7 @@ func (s *Server) refundSale(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	result := map[string]any{"id": id, "saleId": saleID, "total": total, "currency": currency, "payment": payment}
+	result := map[string]any{"id": id, "saleId": saleID, "total": total, "currency": currency, "payment": payment, "debtReduction": debtReduction, "cashReturned": cashReturned, "cardReturned": cardReturned}
 	if saveRequest(r.Context(), tx, req.RequestID, "refund:"+fmtID(saleID), hash, principal(r).ID, result) != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not complete refund")
 		return

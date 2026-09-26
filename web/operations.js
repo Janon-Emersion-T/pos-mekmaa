@@ -37,12 +37,12 @@ function pageLinks(size, count) {
 }
 function salesHistoryView() {
   return filterForm("sale-filter", filterInput("Receipt number or product", "q") + filterInput("From", "from", "date") + filterInput("To", "to", "date") + filterInput("Cashier email", "cashier") + filterInput("Session", "sessionId", "number")) +
-    table(["Receipt", "Date", "Items", "Cashier", "Payment", "Total", "Refunded", "Actions"], sales.map(s => `<tr class="border-b"><td class="p-4">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${escapeHTML(s.items)}</td><td class="p-4">${escapeHTML(s.cashierEmail)}</td><td class="p-4">${escapeHTML(s.payment)}</td><td class="p-4">${money(s.total,s.currency)}</td><td class="p-4">${money(s.refunded,s.currency)}</td><td class="p-4"><button data-receipt="${s.id}" class="mr-3 text-orange-600">Receipt</button>${!s.deletedAt && ["admin","superadmin"].includes(currentUser.role) ? `<button data-refund="${s.id}" class="mr-3 text-orange-600">Refund</button>` : ""}${!s.deletedAt && currentUser.role === "superadmin" ? `<button data-delete-sale="${s.id}" class="text-red-600">Delete sale</button>` : ""}</td></tr>`).join("")) + pageLinks(100, sales.length);
+    table(["Receipt", "Date", "Items", "Customer", "Cashier", "Payment", "Total", "Refunded", "Remaining", "Actions"], sales.map(s => `<tr class="border-b"><td class="p-4">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${escapeHTML(s.items)}</td><td class="p-4">${escapeHTML(s.customerName || "Walk-in")}</td><td class="p-4">${escapeHTML(s.cashierEmail)}</td><td class="p-4">${escapeHTML(s.payment)}</td><td class="p-4">${money(s.total,s.currency)}</td><td class="p-4">${money(s.refunded,s.currency)}</td><td class="p-4">${money(s.outstanding || 0,s.currency)}</td><td class="p-4"><button data-receipt="${s.id}" class="mr-3 text-orange-600">Receipt</button>${!s.deletedAt && ["admin","superadmin"].includes(currentUser.role) ? `<button data-refund="${s.id}" class="mr-3 text-orange-600">Refund</button>` : ""}${!s.deletedAt && currentUser.role === "superadmin" ? `<button data-delete-sale="${s.id}" class="text-red-600">Delete sale</button>` : ""}</td></tr>`).join("")) + pageLinks(100, sales.length);
 }
 function dailyReportView() {
   const csv = new URLSearchParams(location.search); csv.set("format", "csv");
   return filterForm("report-filter", filterInput("Report date", "date", "date")) + `<p class="mb-4 text-xs text-gray-500">${escapeHTML(reportData.date)} · ${escapeHTML(reportData.timezone)}</p><a href="/api/reports/daily?${escapeHTML(csv.toString())}" class="text-sm text-orange-600">Download CSV</a>` +
-    table(["Currency", "Sales", "Cash sales", "Card sales", "Refunds", "Net sales", "Petty cash in", "Petty cash out", "Closing difference"], reportData.rows.map(r => `<tr class="border-b">${[escapeHTML(r.currency), r.saleCount, money(r.cashSales,r.currency), money(r.cardSales,r.currency), money(r.cashRefunds+r.cardRefunds,r.currency), money(r.cashSales+r.cardSales-r.cashRefunds-r.cardRefunds,r.currency), money(r.pettyIn,r.currency), money(r.pettyOut,r.currency), money(r.closingDifference,r.currency)].map(v=>`<td class="p-4">${v}</td>`).join("")}</tr>`).join(""));
+    table(["Currency", "Sales", "Cash sales", "Card sales", "Credit sales", "Cash collected on credit", "Card collected on credit", "Money refunded", "Debt cancelled", "Net sales", "Petty cash in", "Petty cash out", "Closing difference"], reportData.rows.map(r => `<tr class="border-b">${[escapeHTML(r.currency), r.saleCount, money(r.cashSales,r.currency), money(r.cardSales,r.currency), money(r.creditSales || 0,r.currency), money(r.cashCollections || 0,r.currency), money(r.cardCollections || 0,r.currency), money(r.cashRefunds+r.cardRefunds,r.currency), money(r.creditReturns || 0,r.currency), money(r.cashSales+r.cardSales+(r.creditSales || 0)-r.cashRefunds-r.cardRefunds-(r.creditReturns || 0),r.currency), money(r.pettyIn,r.currency), money(r.pettyOut,r.currency), money(r.closingDifference,r.currency)].map(v=>`<td class="p-4">${v}</td>`).join("")}</tr>`).join(""));
 }
 function auditView() {
   return filterForm("audit-filter", filterInput("Entity", "entity") + filterInput("Staff email", "actor")) +
@@ -52,7 +52,7 @@ function accountView() {
   return `<form data-form="password" class="grid max-w-md gap-4 rounded-xl border bg-white p-5">${currentUser.mustChangePassword ? '<p class="text-sm text-orange-600">Change your temporary password before continuing.</p>' : ""}${field("Current password", "currentPassword", "password")}${field("New password (12–72 bytes)", "newPassword", "password")}${field("Confirm new password", "confirmPassword", "password")}<button class="rounded-lg bg-accent px-5 py-3 text-sm text-white">Change password</button><p class="text-xs text-gray-500">You will need to sign in again on all devices.</p></form>`;
 }
 function showReceipt(sale) {
-  $("#receipt").innerHTML = `<h2 class="text-xl font-semibold">Receipt #${sale.id}</h2><p class="mt-2 text-xs">${new Date(sale.created).toLocaleString()}</p><p class="mt-2 text-xs">${escapeHTML(sale.cashierEmail)}</p><div class="my-6 text-sm">${sale.lines ? sale.lines.map(line => `<p>${line.quantity} × ${escapeHTML(line.name)} — ${money(line.quantity*line.unitPrice,sale.currency)}</p>`).join("") : escapeHTML(sale.items)}</div><p class="font-semibold">Total: ${money(sale.total,sale.currency)}</p><p class="mt-2 text-sm">Payment: ${escapeHTML(sale.payment)}</p>${sale.cashReceived != null ? `<p class="text-sm">Cash received: ${money(sale.cashReceived,sale.currency)}</p><p class="text-sm">Change: ${money(sale.changeDue,sale.currency)}</p>` : ""}${sale.deletedAt ? '<p class="mt-3 text-red-600">Deleted sale</p>' : ""}`;
+  $("#receipt").innerHTML = `<h2 class="text-xl font-semibold">Receipt #${sale.id}</h2><p class="mt-2 text-xs">${new Date(sale.created).toLocaleString()}</p><p class="mt-2 text-xs">${escapeHTML(sale.cashierEmail)}</p>${sale.customerName ? `<p class="mt-2 text-sm">Customer: ${escapeHTML(sale.customerName)}</p>` : ""}<div class="my-6 text-sm">${sale.lines ? sale.lines.map(line => `<p>${line.quantity} × ${escapeHTML(line.name)} — ${money(line.quantity*line.unitPrice,sale.currency)}</p>`).join("") : escapeHTML(sale.items)}</div><p class="font-semibold">Total: ${money(sale.total,sale.currency)}</p><p class="mt-2 text-sm">Payment: ${escapeHTML(sale.payment)}</p>${sale.payment === "credit" ? `<p class="mt-3 text-sm">Buy now, pay later</p><p class="text-sm">Paid (net): ${money(sale.paidAmount,sale.currency)}</p><p class="font-semibold">Remaining balance: ${money(sale.outstanding,sale.currency)}</p>` : ""}${sale.cashReceived != null ? `<p class="text-sm">Cash received: ${money(sale.cashReceived,sale.currency)}</p><p class="text-sm">Change: ${money(sale.changeDue,sale.currency)}</p>` : ""}${sale.deletedAt ? '<p class="mt-3 text-red-600">Deleted sale</p>' : ""}`;
   $("#receipt-dialog").showModal();
 }
 $("#checkout").onclick = async () => {
@@ -70,7 +70,14 @@ $("#checkout").onclick = async () => {
         cashReceived = minorUnits(entered.trim());
         if (cashReceived < expectedTotal) throw Error("Cash received must cover the total");
       }
-      const request = {requestId: crypto.randomUUID(), items, payment, expectedTotal, sessionId:session.id, ...(cashReceived == null ? {} : {cashReceived})};
+      let credit = {};
+      if (payment === "credit") {
+        if (!selectedCustomer) throw Error("Select a customer for buy now, pay later");
+        const initialPayment = minorUnits($("#credit-initial-payment").value);
+        if (expectedTotal <= 0 || initialPayment >= expectedTotal) throw Error("Amount paid now must be less than the total. Use cash or card for a fully paid sale");
+        credit = {initialPayment, initialPaymentMethod:$("#credit-initial-method").value};
+      }
+      const request = {requestId: crypto.randomUUID(), items, payment, expectedTotal, sessionId:session.id, ...(cashReceived == null ? {} : {cashReceived}), ...(selectedCustomer ? {customerId:selectedCustomer} : {}), ...credit};
       // Persist before sending so a lost response can be retried with the same key.
       localStorage.setItem(pendingKey(), JSON.stringify(request));
       pendingCheckout = request;
@@ -89,6 +96,14 @@ $("#checkout").onclick = async () => {
     localStorage.removeItem(pendingKey());
     pendingCheckout = null;
     cart.clear();
+    selectedCustomer = null;
+    $("#credit-initial-payment").value = "0.00";
+    payment = "cash";
+    document.querySelectorAll(".payment").forEach(el=>{
+      el.classList.toggle("border-orange-300",el.dataset.payment===payment);
+      el.classList.toggle("bg-orange-50",el.dataset.payment===payment);
+      el.classList.toggle("text-orange-600",el.dataset.payment===payment);
+    });
     showReceipt(sale);
     await loadPage();
   } catch (error) { toast(error.message); }
@@ -123,7 +138,7 @@ document.addEventListener("change", async e => {
   } catch (error) { toast(error.message); }
   finally { input.disabled = false; input.value = ""; }
 });
-let refundSaleId = null, pendingRefund = null;
+let refundSaleId = null, pendingRefund = null, refundCreditSale = null;
 document.addEventListener("click", async e => {
   const receipt = e.target.closest("[data-receipt]"), refund = e.target.closest("[data-refund]");
   if (!receipt && !refund) return;
@@ -131,8 +146,15 @@ document.addEventListener("click", async e => {
     if (receipt) { showReceipt(await api(`/api/sales/${receipt.dataset.receipt}`)); return; }
     const sale = await api(`/api/sales/${pendingRefund ? refundSaleId : refund.dataset.refund}`);
     refundSaleId = sale.id;
+    refundCreditSale = sale.payment === "credit" ? sale : null;
     $("#refund-title").textContent = `Refund for receipt #${sale.id}`;
     $("#refund-content").innerHTML = sale.lines.filter(line => line.quantity > line.refunded).map(line => `<label class="mb-3 block text-sm">${escapeHTML(line.name)} (${line.quantity-line.refunded} available)<input type="number" data-return-item="${line.id}" min="0" max="${line.quantity-line.refunded}" step="1" value="0" required class="mt-2 h-11 w-full rounded-lg border px-3"><span class="text-xs"><input type="checkbox" data-restock="${line.id}"> Return to stock</span></label>`).join("") + '<label class="block text-sm">Reason<textarea name="reason" required maxlength="500" class="mt-2 w-full rounded-lg border p-3"></textarea></label><label class="mt-3 block text-sm"><input name="confirmed" type="checkbox" required> I confirm the payment has been refunded to the customer.</label>';
+    if (sale.payment === "credit" && !pendingRefund) {
+      $("#refund-content").insertAdjacentHTML("afterbegin", `<p class="mb-3 text-sm">Remaining balance: ${money(sale.outstanding,sale.currency)}. Returns reduce this balance first. Refund only the excess already paid.</p><label class="mb-3 block text-xs">Method for any money returned<select name="creditRefundPayment" class="mt-2 h-11 w-full rounded-lg border px-3"><option value="cash">Cash</option><option value="card">Card</option></select></label>`);
+      $("#refund-content").insertAdjacentHTML("beforeend", '<p id="credit-refund-summary" class="mt-3 text-sm font-semibold"></p>');
+      updateCreditRefundSummary();
+      $("#refund-form [name=confirmed]").parentElement.lastChild.textContent = " I confirm the debt reduction and have returned any amount owed to the customer.";
+    }
     if (pendingRefund) $("#refund-content").innerHTML = '<p class="text-sm">A previous refund is awaiting confirmation. Retry it to recover the result without recording it twice.</p>';
     $("#refund-submit").textContent = pendingRefund ? "Recover refund" : "Record refund";
     $("#refund-error").textContent = "";
@@ -150,7 +172,7 @@ $("#refund-form").onsubmit = async e => {
       const data = new FormData(form);
       const items = [...form.querySelectorAll("[data-return-item]")].filter(input => Number(input.value)>0).map(input => ({saleItemId:Number(input.dataset.returnItem),quantity:Number(input.value),restock:form.querySelector(`[data-restock="${input.dataset.returnItem}"]`).checked}));
       if (!items.length) throw Error("Select at least one return quantity");
-      const request = {requestId:crypto.randomUUID(),items,reason:data.get("reason"),confirmed:data.has("confirmed")};
+      const request = {requestId:crypto.randomUUID(),items,reason:data.get("reason"),confirmed:data.has("confirmed"), ...(data.get("creditRefundPayment") ? {creditRefundPayment:data.get("creditRefundPayment"),expectedOutstanding:refundCreditSale.outstanding} : {})};
       localStorage.setItem(refundKey(), JSON.stringify({saleId:refundSaleId,request}));
       pendingRefund = request;
     }
@@ -167,3 +189,12 @@ $("#refund-form").onsubmit = async e => {
     $("#refund-error").textContent = error.message;
   } finally { button.disabled = false; }
 };
+
+function updateCreditRefundSummary() {
+  const summary = $("#credit-refund-summary");
+  if (!summary || !refundCreditSale) return;
+  const total = [...$("#refund-form").querySelectorAll("[data-return-item]")].reduce((sum,input)=>sum+Number(input.value)*refundCreditSale.lines.find(line=>line.id===Number(input.dataset.returnItem)).unitPrice,0);
+  const debt = Math.min(total,refundCreditSale.outstanding);
+  summary.textContent = `Debt cancelled: ${money(debt,refundCreditSale.currency)} · Money to return: ${money(total-debt,refundCreditSale.currency)}`;
+}
+$("#refund-form").addEventListener("input",updateCreditRefundSummary);

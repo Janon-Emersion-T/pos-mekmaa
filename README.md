@@ -55,6 +55,10 @@ Prices use integer hundredths. Admins and superadmins can choose the store curre
 
 ## Products and navigation
 
+Customers are contact records, separate from staff accounts, and never need a login. Use **Customers** to add/edit contact details and view purchases, balances by currency, and payment history. At checkout, select a customer and choose **Buy now, pay later**; enter zero or a partial cash/card payment. Walk-in sales continue to support cash and card.
+
+Collect later payments from the customer's account against an unpaid receipt. Collections require an open register in the receipt's currency. Only actual cash collections increase the current register's expected cash; credit sales and card collections do not. Daily reports separate credit sales from cash/card collections to avoid counting revenue twice. Returns cancel unpaid debt first, then refund any paid excess. Sales with payments cannot be deleted, preserving their payment history.
+
 Each menu has a bookmarkable URL (for example, `/products`, `/inventory`, and `/settings`), with browser Back/Forward and direct reload support.
 
 Admins and superadmins can use **Products** to add and edit names, categories, prices, costs, reorder levels, and appearance. Opening stock is recorded when creating a product; subsequent stock changes use Inventory or Purchases. Category filters are generated from active products. Enter monetary amounts in the selected currency (for example, `125.50`); the API stores integer hundredths.

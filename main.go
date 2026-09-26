@@ -47,6 +47,10 @@ type Line struct {
 	UnitCost  int `json:"unitCost,omitempty"`
 }
 type Sale struct {
+	CustomerID       *int64        `json:"customerId"`
+	CustomerName     string        `json:"customerName"`
+	PaidAmount       int           `json:"paidAmount"`
+	Outstanding      int           `json:"outstanding"`
 	Currency         string        `json:"currency"`
 	CurrencyInferred bool          `json:"currencyInferred"`
 	CashReceived     *int          `json:"cashReceived"`
@@ -309,18 +313,29 @@ func (s *Server) products(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Items         []Line `json:"items"`
-		Payment       string `json:"payment"`
-		ExpectedTotal *int   `json:"expectedTotal"`
-		SessionID     *int64 `json:"sessionId"`
-		RequestID     string `json:"requestId"`
-		CashReceived  *int   `json:"cashReceived"`
+		Items                []Line `json:"items"`
+		Payment              string `json:"payment"`
+		ExpectedTotal        *int   `json:"expectedTotal"`
+		SessionID            *int64 `json:"sessionId"`
+		RequestID            string `json:"requestId"`
+		CashReceived         *int   `json:"cashReceived"`
+		CustomerID           *int64 `json:"customerId,omitempty"`
+		InitialPayment       int    `json:"initialPayment,omitempty"`
+		InitialPaymentMethod string `json:"initialPaymentMethod,omitempty"`
 	}
 	if !decode(w, r, &req) {
 		return
 	}
-	if len(req.Items) == 0 || len(req.Items) > 100 || (req.Payment != "cash" && req.Payment != "card") {
+	if len(req.Items) == 0 || len(req.Items) > 100 || (req.Payment != "cash" && req.Payment != "card" && req.Payment != "credit") {
 		problem(w, 400, "Invalid order")
+		return
+	}
+	if (req.CustomerID != nil && *req.CustomerID < 1) || (req.Payment == "credit" && req.CustomerID == nil) {
+		problem(w, 400, "Select a customer for buy now, pay later")
+		return
+	}
+	if req.InitialPayment < 0 || req.InitialPayment > 10000000 || (req.Payment != "credit" && (req.InitialPayment != 0 || req.InitialPaymentMethod != "")) || (req.InitialPaymentMethod != "" && req.InitialPaymentMethod != "cash" && req.InitialPaymentMethod != "card") {
+		problem(w, 400, "Enter a valid initial payment and payment method")
 		return
 	}
 	combined := make(map[int]int)
@@ -368,6 +383,18 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		problem(w, 409, "The register session has changed. Review the active session before selling.")
 		return
 	}
+	var customerName string
+	if req.CustomerID != nil {
+		err = tx.QueryRowContext(r.Context(), `SELECT name FROM customers WHERE id=$1 FOR SHARE`, *req.CustomerID).Scan(&customerName)
+		if errors.Is(err, sql.ErrNoRows) {
+			problem(w, 400, "Customer not found")
+			return
+		}
+		if err != nil {
+			problem(w, 500, "Could not load customer")
+			return
+		}
+	}
 	total := 0
 	type item struct {
 		Line
@@ -399,6 +426,10 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var change *int
+	if req.Payment == "credit" && (total <= 0 || req.InitialPayment >= total) {
+		problem(w, 400, "The initial payment must be less than the total. Use cash or card for a fully paid sale")
+		return
+	}
 	if req.Payment == "cash" {
 		if req.CashReceived == nil || *req.CashReceived < total || *req.CashReceived > 2147483647 {
 			problem(w, 400, "Cash received must cover the total")
@@ -412,7 +443,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	created := time.Now()
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by,cashier_email,currency,cash_received,change_due) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID, principal(r).Email, session.Currency, req.CashReceived, change).Scan(&id, &created); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by,cashier_email,currency,cash_received,change_due,customer_id,customer_name) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID, principal(r).Email, session.Currency, req.CashReceived, change, req.CustomerID, customerName).Scan(&id, &created); err != nil {
 		problem(w, 500, "Could not save sale")
 		return
 	}
@@ -432,6 +463,21 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		names = append(names, fmt.Sprintf("%d × %s", x.Quantity, x.Name))
 	}
 	result := Sale{ID: id, Created: created, Total: total, Payment: req.Payment, Items: strings.Join(names, ", "), SessionID: session.ID, CreatedBy: principal(r).ID, CashierEmail: principal(r).Email, Currency: session.Currency, CashReceived: req.CashReceived, ChangeDue: change}
+	result.CustomerID, result.CustomerName, result.PaidAmount = req.CustomerID, customerName, total
+	if req.Payment == "credit" {
+		result.PaidAmount, result.Outstanding = req.InitialPayment, total-req.InitialPayment
+		if req.InitialPayment > 0 {
+			method := req.InitialPaymentMethod
+			if method == "" {
+				method = "cash"
+			}
+			_, err = tx.ExecContext(r.Context(), `INSERT INTO customer_payments(sale_id,session_id,amount,payment,currency,note,created_by,cashier_email) VALUES($1,$2,$3,$4,$5,'Payment at checkout',$6,$7)`, id, session.ID, req.InitialPayment, method, session.Currency, principal(r).ID, principal(r).Email)
+			if err != nil {
+				problem(w, 500, "Could not record initial payment")
+				return
+			}
+		}
+	}
 	if err = saveRequest(r.Context(), tx, req.RequestID, "checkout", requestHash, principal(r).ID, result); err != nil {
 		problem(w, 500, "Could not save checkout result")
 		return
@@ -972,6 +1018,7 @@ func (s *Server) routes() http.Handler {
 	private := http.NewServeMux()
 	private.HandleFunc("GET /api/auth/me", s.me)
 	s.operationRoutes(private)
+	s.customerRoutes(private)
 	private.Handle("GET /api/settings", requireRoles(s.settings, "superadmin", "admin", "cashier"))
 	private.Handle("PUT /api/settings", requireRoles(s.updateSettings, "superadmin", "admin"))
 	private.Handle("GET /api/categories", requireRoles(s.categories, "superadmin", "admin", "cashier"))
@@ -1000,7 +1047,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
-	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings", "/reports", "/audit", "/account"} {
+	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers"} {
 		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, sub, "index.html")
 		})

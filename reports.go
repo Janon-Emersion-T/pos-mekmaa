@@ -10,6 +10,10 @@ import (
 )
 
 type DailyRow struct {
+	CreditSales       int    `json:"creditSales"`
+	CashCollections   int    `json:"cashCollections"`
+	CardCollections   int    `json:"cardCollections"`
+	CreditReturns     int    `json:"creditReturns"`
 	Currency          string `json:"currency"`
 	SaleCount         int    `json:"saleCount"`
 	CashSales         int    `json:"cashSales"`
@@ -34,10 +38,13 @@ func (s *Server) dailyReport(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.db.QueryContext(r.Context(), `WITH events AS(
  SELECT currency,'sale_'||payment AS kind,total AS amount FROM sales WHERE created_at>=$1 AND created_at<$2 AND deleted_at IS NULL
- UNION ALL SELECT currency,'refund_'||payment,total FROM refunds WHERE created_at>=$1 AND created_at<$2
+ UNION ALL SELECT currency,'refund_'||payment,CASE WHEN payment='credit' THEN total-cash_returned-card_returned ELSE total END FROM refunds WHERE created_at>=$1 AND created_at<$2
+ UNION ALL SELECT currency,'refund_cash',cash_returned FROM refunds WHERE payment='credit' AND created_at>=$1 AND created_at<$2
+ UNION ALL SELECT currency,'refund_card',card_returned FROM refunds WHERE payment='credit' AND created_at>=$1 AND created_at<$2
+ UNION ALL SELECT currency,'collection_'||payment,amount FROM customer_payments WHERE created_at>=$1 AND created_at<$2
  UNION ALL SELECT currency,'petty_'||direction,amount FROM petty_cash_entries WHERE created_at>=$1 AND created_at<$2
  UNION ALL SELECT currency,'close',closing_cash-closing_expected_cash FROM register_sessions WHERE closed_at>=$1 AND closed_at<$2 AND closing_expected_cash IS NOT NULL)
- SELECT currency,count(*) FILTER(WHERE kind LIKE 'sale_%'),COALESCE(sum(amount) FILTER(WHERE kind='sale_cash'),0),COALESCE(sum(amount) FILTER(WHERE kind='sale_card'),0),COALESCE(sum(amount) FILTER(WHERE kind='refund_cash'),0),COALESCE(sum(amount) FILTER(WHERE kind='refund_card'),0),COALESCE(sum(amount) FILTER(WHERE kind='petty_in'),0),COALESCE(sum(amount) FILTER(WHERE kind='petty_out'),0),COALESCE(sum(amount) FILTER(WHERE kind='close'),0),count(*) FILTER(WHERE kind='close') FROM events GROUP BY currency ORDER BY currency`, from, to)
+ SELECT currency,count(*) FILTER(WHERE kind LIKE 'sale_%'),COALESCE(sum(amount) FILTER(WHERE kind='sale_cash'),0),COALESCE(sum(amount) FILTER(WHERE kind='sale_card'),0),COALESCE(sum(amount) FILTER(WHERE kind='refund_cash'),0),COALESCE(sum(amount) FILTER(WHERE kind='refund_card'),0),COALESCE(sum(amount) FILTER(WHERE kind='petty_in'),0),COALESCE(sum(amount) FILTER(WHERE kind='petty_out'),0),COALESCE(sum(amount) FILTER(WHERE kind='close'),0),count(*) FILTER(WHERE kind='close'),COALESCE(sum(amount) FILTER(WHERE kind='sale_credit'),0),COALESCE(sum(amount) FILTER(WHERE kind='collection_cash'),0),COALESCE(sum(amount) FILTER(WHERE kind='collection_card'),0),COALESCE(sum(amount) FILTER(WHERE kind='refund_credit'),0) FROM events GROUP BY currency ORDER BY currency`, from, to)
 	if err != nil {
 		problem(w, 500, "Could not load report")
 		return
@@ -46,7 +53,7 @@ func (s *Server) dailyReport(w http.ResponseWriter, r *http.Request) {
 	out := []DailyRow{}
 	for rows.Next() {
 		var x DailyRow
-		if rows.Scan(&x.Currency, &x.SaleCount, &x.CashSales, &x.CardSales, &x.CashRefunds, &x.CardRefunds, &x.PettyIn, &x.PettyOut, &x.ClosingDifference, &x.ClosedSessions) != nil {
+		if rows.Scan(&x.Currency, &x.SaleCount, &x.CashSales, &x.CardSales, &x.CashRefunds, &x.CardRefunds, &x.PettyIn, &x.PettyOut, &x.ClosingDifference, &x.ClosedSessions, &x.CreditSales, &x.CashCollections, &x.CardCollections, &x.CreditReturns) != nil {
 			problem(w, 500, "Could not read report")
 			return
 		}
@@ -61,9 +68,9 @@ func (s *Server) dailyReport(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", `attachment; filename="closing-`+day+`.csv"`)
 		c := csv.NewWriter(w)
 		defer c.Flush()
-		c.Write([]string{"date", "timezone", "currency", "sales", "cash_sales", "card_sales", "cash_refunds", "card_refunds", "net_sales", "petty_in", "petty_out", "net_cash_movement", "closed_registers", "closing_difference"})
+		c.Write([]string{"date", "timezone", "currency", "sales", "cash_sales", "card_sales", "cash_refunds", "card_refunds", "net_sales", "petty_in", "petty_out", "net_cash_movement", "closed_registers", "closing_difference", "credit_sales", "cash_collections", "card_collections", "debt_cancelled"})
 		for _, x := range out {
-			c.Write([]string{day, businessLocation().String(), x.Currency, strconv.Itoa(x.SaleCount), decimalAmount(x.CashSales), decimalAmount(x.CardSales), decimalAmount(x.CashRefunds), decimalAmount(x.CardRefunds), decimalAmount(x.CashSales + x.CardSales - x.CashRefunds - x.CardRefunds), decimalAmount(x.PettyIn), decimalAmount(x.PettyOut), decimalAmount(x.CashSales - x.CashRefunds + x.PettyIn - x.PettyOut), strconv.Itoa(x.ClosedSessions), decimalAmount(x.ClosingDifference)})
+			c.Write([]string{day, businessLocation().String(), x.Currency, strconv.Itoa(x.SaleCount), decimalAmount(x.CashSales), decimalAmount(x.CardSales), decimalAmount(x.CashRefunds), decimalAmount(x.CardRefunds), decimalAmount(x.CashSales + x.CardSales + x.CreditSales - x.CashRefunds - x.CardRefunds - x.CreditReturns), decimalAmount(x.PettyIn), decimalAmount(x.PettyOut), decimalAmount(x.CashSales + x.CashCollections - x.CashRefunds + x.PettyIn - x.PettyOut), strconv.Itoa(x.ClosedSessions), decimalAmount(x.ClosingDifference), decimalAmount(x.CreditSales), decimalAmount(x.CashCollections), decimalAmount(x.CardCollections), decimalAmount(x.CreditReturns)})
 		}
 		return
 	}

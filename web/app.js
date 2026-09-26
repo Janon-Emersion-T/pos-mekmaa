@@ -88,7 +88,7 @@ let editingProduct = null;
 let editingCategory = null;
 let pageRequest = 0;
 const pageTitles = {
-  pos: "Point of sale", products: "Products", session: "Register session",
+  customers: "Customers", pos: "Point of sale", products: "Products", session: "Register session",
   sales: "Sales history", inventory: "Inventory", purchases: "Purchases",
   petty: "Petty cash", users: "Staff users", settings: "Settings", reports: "Daily report", audit: "Audit history", account: "Account",
 };
@@ -178,6 +178,7 @@ function renderCart() {
   $("#session-notice").innerHTML = session
     ? `<p class="font-medium">Session #${session.id} · ${escapeHTML(currentUser?.email || "")}</p><p>Opened by ${escapeHTML(session.openedByEmail)} · ${new Date(session.openedAt).toLocaleString()}</p>`
     : '<p class="font-medium">Open a register session to complete a sale.</p><a href="/session" data-page="session" class="text-orange-600">Open register →</a>';
+  renderCustomerPicker();
   if (pendingCheckout) $("#session-notice").innerHTML = '<p class="font-medium">A checkout is awaiting confirmation.</p><p>Recover it before starting another sale. Retrying will not duplicate the sale.</p>';
 }
 function add(id, delta = 1) {
@@ -267,7 +268,9 @@ function renderOther() {
   let title = "",
     desc = "",
     body = "";
-  if (page === "products") {
+  if (page === "customers") {
+    title = "Customers"; desc = "Contact details, purchases, and outstanding balances. Customers do not need a login."; body = customersView();
+  } else if (page === "products") {
     title = "Products";
     desc = "Add your products and categories, set prices, and manage the catalog.";
     body = productManagement();
@@ -400,16 +403,19 @@ function renderOther() {
 async function loadPage() {
   const request = ++pageRequest, requestedPage = page;
   try {
-    const endpoints = { reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
-    const [savedSettings, savedProducts, savedSession, records, savedCategories] = await Promise.all([
+    const customerId = new URLSearchParams(location.search).get("id");
+    const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
+    const [savedSettings, savedProducts, savedSession, records, savedCategories, savedCustomers] = await Promise.all([
       api("/api/settings"), api("/api/products"), api("/api/session"),
       endpoints[requestedPage] ? api(endpoints[requestedPage]) : Promise.resolve(null),
-      api("/api/categories"),
+      api("/api/categories"), api("/api/customers"),
     ]);
     if (request !== pageRequest) return;
     applySettings(savedSettings);
     products = savedProducts;
     productCategories = savedCategories;
+    customers = savedCustomers;
+    if (requestedPage === "customers") customerAccount = records;
     session = savedSession;
     if (requestedPage === "sales") sales = records;
     if (requestedPage === "reports") reportData = records;
@@ -591,6 +597,7 @@ document.addEventListener("click", async (e) => {
   }
   if (pay && !busy && !pendingCheckout) {
     payment = pay.dataset.payment;
+    renderCart();
     document.querySelectorAll(".payment").forEach((el) => {
       el.classList.toggle("border-orange-300", el.dataset.payment === payment);
       el.classList.toggle("bg-orange-50", el.dataset.payment === payment);
@@ -643,7 +650,7 @@ $("#other-page").addEventListener("submit", async (e) => {
   const f = e.target,
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
-  if (["sale-filter","report-filter","audit-filter","password"].includes(kind)) return;
+  if (["sale-filter","report-filter","audit-filter","password","customer","customer-filter","customer-payment"].includes(kind)) return;
   if (f.dataset.saving) return;
   f.dataset.saving = "true";
   const submit = f.querySelector('button:not([type="button"])');

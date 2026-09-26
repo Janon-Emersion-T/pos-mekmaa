@@ -68,6 +68,15 @@ func (s *Server) deleteSale(w http.ResponseWriter, r *http.Request) {
 		problem(w, 409, "Refunded sales cannot be deleted; keep their refund trail")
 		return
 	}
+	var hasPayments bool
+	if tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM customer_payments WHERE sale_id=$1)`, id).Scan(&hasPayments) != nil {
+		problem(w, 500, "Could not check customer payments")
+		return
+	}
+	if hasPayments {
+		problem(w, 409, "Sales with customer payments cannot be deleted. Record a return to preserve the payment history")
+		return
+	}
 	if deleted.Valid {
 		problem(w, 409, "This sale has already been deleted")
 		return
