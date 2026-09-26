@@ -252,3 +252,43 @@ test('customers are accessible from the mobile navigation',async t=>{
   assert.equal(await page.locator('#other-page h1').innerText(),'Customers');
   assert.deepEqual(errors,[]);
 });
+test('opening debt is sent in minor units and a lost customer save can be recovered',async t=>{
+  let attempts=0;
+  const {page,errors,requests}=await setup(t,{handle:async(route,pathname)=>{
+    if(pathname!=='/api/customers'||route.request().method()!=='POST')return false;
+    if(++attempts===1)await route.abort('failed');
+    else await route.fulfill({json:{id:1}});
+    return true;
+  }});
+  await ready(page,'/customers');
+  await page.locator('[data-form=customer] [name=name]').fill('Existing debtor');
+  await page.locator('[data-form=customer] [name=openingBalance]').fill('1234.50');
+  await page.locator('[data-form=customer] button').click();
+  await page.locator('[data-recover-customer]').waitFor();
+  await ready(page,'/customers');
+  assert.equal(await page.locator('[data-form=customer] button').isDisabled(),true);
+  await page.locator('[data-recover-customer]').click();
+  await page.waitForFunction(()=>document.querySelector('#toast').textContent==='Customer saved');
+  const calls=requests.filter(r=>r.path==='/api/customers'&&r.method==='POST');
+  assert.equal(calls.length,2);assert.deepEqual(calls[0].body,calls[1].body);
+  assert.equal(calls[0].body.openingBalance,123450);
+  assert.equal(calls[0].body.openingCurrency,'LKR');
+  assert.ok(calls[0].body.requestId);
+  assert.deepEqual(errors,[]);
+});
+test('customer account can collect an opening balance without a sales receipt',async t=>{
+  const openingBalance={id:4,amount:10000,currency:'LKR',paidAmount:2500,outstanding:7500};
+  const {page,errors,requests}=await setup(t,{customers:[customer],customerAccount:{customer,sales:[],payments:[{id:1,saleId:0,openingBalanceId:4,amount:2500,currency:'LKR',payment:'cash',created:'2026-09-26T08:00:00Z',cashierEmail:'test@example.test',note:''}],openingBalance},handle:async(route,pathname)=>{
+    if(pathname!=='/api/customers/1/payments')return false;
+    await route.fulfill({json:{id:2,outstanding:5000,currency:'LKR'}});return true;
+  }});
+  await ready(page,'/customers?id=1');
+  assert.match(await page.locator('#other-page').innerText(),/Opening balance · Previous purchases/);
+  assert.equal(await page.locator('[data-form=customer-payment] [name=saleId]').inputValue(),'opening:4');
+  await page.locator('[data-form=customer-payment] [name=amount]').fill('25.00');
+  await page.locator('[data-form=customer-payment] button').click();
+  await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('Payment recorded'));
+  const request=requests.find(r=>r.path==='/api/customers/1/payments').body;
+  assert.equal(request.openingBalanceId,4);assert.equal(request.saleId,undefined);assert.equal(request.amount,2500);
+  assert.deepEqual(errors,[]);
+});

@@ -256,4 +256,95 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	request("POST", path, req, 409)
 	request("GET", customerPath, "", 200)
 	request("GET", "/api/audit", "", 200)
+	t.Run("Opening balances", func(t *testing.T) {
+		request("POST", "/api/session/close", fmt.Sprintf(`{"sessionId":%d,"closingCash":0}`, sessionID), 200)
+		salesBefore := scalar(`SELECT count(*) FROM sales`)
+		request("POST", "/api/customers", `{"name":"Invalid debt","openingBalance":-1}`, 400)
+		request("POST", "/api/customers", `{"name":"Invalid debt","openingBalance":10000001}`, 400)
+		request("POST", "/api/customers", `{"name":"Invalid debt","openingBalance":1.5}`, 400)
+		countBefore := scalar(`SELECT count(*) FROM customers`)
+		request("POST", "/api/customers", `{"name":"Wrong currency","openingBalance":10000,"openingCurrency":"USD"}`, 409)
+		if scalar(`SELECT count(*) FROM customers`) != countBefore {
+			t.Fatal("failed balance creation left a customer behind")
+		}
+		createBody := `{"requestId":"historical-customer-create","name":"Existing debtor","openingBalance":10000,"openingCurrency":"LKR"}`
+		openingCustomerID := idFrom(request("POST", "/api/customers", createBody, 201))
+		if idFrom(request("POST", "/api/customers", createBody, 200)) != openingCustomerID {
+			t.Fatal("customer retry created a duplicate")
+		}
+		openingPath := fmt.Sprintf("/api/customers/%d", openingCustomerID)
+		if scalar(`SELECT count(*) FROM customers`) != countBefore+1 || scalar(`SELECT count(*) FROM sales`) != salesBefore || scalar(`SELECT count(*) FROM users`) != usersBefore {
+			t.Fatal("opening debt must not create sales, duplicate customers, or logins")
+		}
+		var detail struct {
+			OpeningBalance *CustomerOpeningBalance
+			Payments       []CustomerPayment
+			Sales          []Sale
+		}
+		if err := json.Unmarshal(request("GET", openingPath, "", 200).Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail.OpeningBalance == nil || detail.OpeningBalance.Outstanding != 10000 || detail.OpeningBalance.Currency != "LKR" || len(detail.Sales) != 0 || len(detail.Payments) != 0 {
+			t.Fatalf("opening statement: %+v", detail)
+		}
+		openingID := detail.OpeningBalance.ID
+		openingPayment := func(key string, amount int, method string) string {
+			return fmt.Sprintf(`{"requestId":%q,"openingBalanceId":%d,"sessionId":%d,"amount":%d,"payment":%q}`, key, openingID, sessionID, amount, method)
+		}
+		openingPaymentPath := openingPath + "/payments"
+		request("POST", openingPaymentPath, openingPayment("historical-closed-register", 100, "cash"), 409)
+		request("PUT", openingPath, `{"name":"Renamed debtor","openingBalance":0}`, 400)
+		request("PUT", openingPath, `{"name":"Renamed debtor"}`, 200)
+		sessionID = idFrom(request("POST", "/api/session/open", `{"openingCash":0}`, 201))
+		cash(0)
+		request("POST", customerPath+"/payments", openingPayment("historical-wrong-customer", 100, "cash"), 404)
+		request("POST", openingPaymentPath, fmt.Sprintf(`{"requestId":"historical-two-targets","saleId":%d,"openingBalanceId":%d,"sessionId":%d,"amount":100,"payment":"cash"}`, saleID, openingID, sessionID), 400)
+		request("POST", openingPaymentPath, openingPayment("historical-overpayment", 10001, "cash"), 409)
+		body := openingPayment("historical-first-payment", 2500, "cash")
+		request("POST", openingPaymentPath, body, 201)
+		request("POST", openingPaymentPath, body, 200)
+		cash(2500)
+		var concurrent [2]*httptest.ResponseRecorder
+		for i := range concurrent {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				concurrent[i] = call("POST", openingPaymentPath, openingPayment(fmt.Sprintf("historical-concurrent-%d", i), 6000, "cash"))
+			}(i)
+		}
+		wg.Wait()
+		if !((concurrent[0].Code == 201 && concurrent[1].Code == 409) || (concurrent[1].Code == 201 && concurrent[0].Code == 409)) {
+			t.Fatalf("opening debt concurrency: %d / %d", concurrent[0].Code, concurrent[1].Code)
+		}
+		request("POST", openingPaymentPath, openingPayment("historical-final-payment", 1500, "card"), 201)
+		cash(8500)
+		if err := json.Unmarshal(request("GET", openingPath, "", 200).Body.Bytes(), &detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail.OpeningBalance.Outstanding != 0 || detail.OpeningBalance.PaidAmount != 10000 || len(detail.Payments) != 3 {
+			t.Fatalf("settled opening balance: %+v", detail)
+		}
+		for _, p := range detail.Payments {
+			if p.SaleID != 0 || p.OpeningBalanceID == nil || *p.OpeningBalanceID != openingID {
+				t.Fatalf("payment not linked to opening debt: %+v", p)
+			}
+		}
+		if err := json.Unmarshal(request("GET", "/api/reports/daily", "", 200).Body.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, row := range report.Rows {
+			if row.Currency == "LKR" {
+				found = true
+				if row.SaleCount != 0 || row.CreditSales != 0 || row.CashSales != 0 || row.CashCollections != 8500 || row.CardCollections != 1500 {
+					t.Fatalf("historical debt report: %+v", row)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing opening debt collections in report")
+		}
+		request("POST", openingPaymentPath, openingPayment("historical-paid-in-full", 1, "cash"), 409)
+	})
+
 }

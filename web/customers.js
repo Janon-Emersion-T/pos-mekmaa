@@ -1,5 +1,6 @@
 let customers = [], customerAccount = null, editingCustomer = null, selectedCustomer = null;
-let pendingCollection = null;
+let pendingCollection = null, pendingCustomerCreate = null;
+const customerCreateKey = () => `counter.pending-customer.${currentUser.id}`;
 const collectionKey = () => `counter.pending-collection.${currentUser.id}`;
 function renderCustomerPicker() {
   const selector = $("#checkout-customer");
@@ -19,23 +20,26 @@ function optionalCustomerField(label,name,value,max,type="text") {
   return `<label class="text-xs text-gray-600">${label}<input name="${name}" type="${type}" maxlength="${max}" value="${escapeHTML(value || '')}" class="mt-2 h-11 w-full rounded-lg border px-3"></label>`;
 }
 function customersView() {
+  try { pendingCustomerCreate = JSON.parse(localStorage.getItem(customerCreateKey()) || "null"); } catch {}
   const editing = customers.find(c=>c.id===editingCustomer);
   const q = (new URLSearchParams(location.search).get("q") || "").toLowerCase();
   const filtered = customers.filter(c=>(c.name+' '+c.phone+' '+c.email).toLowerCase().includes(q));
   const balances = c => c.balances.length ? c.balances.map(b=>money(b.outstanding,b.currency)).join(' · ') : 'No outstanding balance';
-  let body = `<form data-form="customer" data-id="${editing?.id || ''}" class="mb-5 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3"><h2 class="font-semibold sm:col-span-3">${editing?'Edit customer':'Add customer'}</h2>${field('Customer name','name','text',editing?.name || '')}${optionalCustomerField('Phone (optional)','phone',editing?.phone,50,'tel')}${optionalCustomerField('Email (optional)','email',editing?.email,254,'email')}${optionalCustomerField('Address (optional)','address',editing?.address,500)}${optionalCustomerField('Notes (optional)','notes',editing?.notes,1000)}<div class="flex items-center gap-3"><button class="rounded-lg bg-accent px-5 py-3 text-sm text-white">${editing?'Save customer':'Add customer'}</button>${editing?'<button type="button" data-cancel-customer class="text-sm">Cancel</button>':''}</div></form>`;
+  let body = `<form data-form="customer" data-id="${editing?.id || ''}" class="mb-5 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3"><h2 class="font-semibold sm:col-span-3">${editing?'Edit customer':'Add customer'}</h2>${field('Customer name','name','text',editing?.name || '')}${optionalCustomerField('Phone (optional)','phone',editing?.phone,50,'tel')}${optionalCustomerField('Email (optional)','email',editing?.email,254,'email')}${optionalCustomerField('Address (optional)','address',editing?.address,500)}${optionalCustomerField('Notes (optional)','notes',editing?.notes,1000)}${!editing ? amountField('Already owed / opening balance','openingBalance','0.00')+'<p class="text-xs text-gray-500 sm:col-span-3">Enter money owed from before using this system. Leave zero for a new customer. This does not count as a new sale or cash received.</p>' : ''}<div class="flex items-center gap-3"><button ${pendingCustomerCreate && !editing?'disabled':''} class="rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">${editing?'Save customer':'Add customer'}</button>${editing?'<button type="button" data-cancel-customer class="text-sm">Cancel</button>':''}</div></form>`;
+  if (pendingCustomerCreate) body += '<div class="mb-5 rounded-lg border bg-orange-50 p-4 text-sm">A customer save is awaiting confirmation.<button data-recover-customer class="ml-3 text-orange-600">Recover customer save</button></div>';
   body += filterForm('customer-filter',filterInput('Search name, phone, or email','q'));
   body += table(['Customer','Phone','Email','Outstanding','Actions'],filtered.map(c=>`<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(c.name)} <span class="text-xs text-gray-400">#${c.id}</span></td><td class="p-4">${escapeHTML(c.phone)}</td><td class="p-4">${escapeHTML(c.email)}</td><td class="p-4">${balances(c)}</td><td class="p-4"><a href="/customers?id=${c.id}" data-page="customers" class="mr-3 text-orange-600">Account</a><button data-edit-customer="${c.id}" class="text-orange-600">Edit</button></td></tr>`).join(''));
   try { pendingCollection = JSON.parse(localStorage.getItem(collectionKey()) || 'null'); } catch { /* Keep any in-memory pending request. */ }
   if (pendingCollection) body += `<div class="my-5 rounded-lg border bg-orange-50 p-4 text-sm">A customer payment is awaiting confirmation. Recover it before recording another payment.<button data-recover-collection class="ml-3 text-orange-600">Recover payment</button></div>`;
   if (!customerAccount) return body;
-  const {customer,sales:history,payments} = customerAccount;
+  const {customer,sales:history,payments,openingBalance} = customerAccount;
   const summary = customers.find(c=>c.id===customer.id) || customer;
   const unpaid = history.filter(s=>s.payment==='credit' && s.outstanding>0);
   body += `<h2 class="mb-3 mt-7 text-xl font-semibold">${escapeHTML(customer.name)} · Account</h2><p class="mb-4 text-sm">${balances(summary)}</p><p class="mb-4 text-xs text-gray-500">${escapeHTML(customer.address)}${customer.notes ? ' · '+escapeHTML(customer.notes) : ''}</p>`;
-  if (unpaid.length) body += `<form data-form="customer-payment" data-customer-id="${customer.id}" class="mb-5 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3"><label class="text-xs">Unpaid receipt<select name="saleId" required class="mt-2 h-11 w-full rounded-lg border px-3">${unpaid.map(s=>`<option value="${s.id}">#${s.id} · ${money(s.outstanding,s.currency)} due</option>`).join('')}</select></label>${amountField('Amount received','amount')}<label class="text-xs">Payment method<select name="payment" class="mt-2 h-11 w-full rounded-lg border px-3"><option value="cash">Cash</option><option value="card">Card</option></select></label>${optionalCustomerField('Note (optional)','note','',500)}<button ${!session || pendingCollection?'disabled':''} class="rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">Record payment</button><p class="text-xs text-gray-500">${session?'Record the amount actually received. Partial payments are accepted.':'Open a register session to collect payment.'}</p></form>`;
+  if (openingBalance) body += `<div class="mb-5 rounded-xl border bg-white p-5"><h3 class="font-semibold">Opening balance · Previous purchases</h3><p class="mt-2 text-sm">Originally owed: ${money(openingBalance.amount,openingBalance.currency)} · Paid: ${money(openingBalance.paidAmount,openingBalance.currency)} · Remaining: ${money(openingBalance.outstanding,openingBalance.currency)}</p></div>`;
+  if (unpaid.length || openingBalance?.outstanding > 0) body += `<form data-form="customer-payment" data-customer-id="${customer.id}" class="mb-5 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3"><label class="text-xs">Pay towards<select name="saleId" required class="mt-2 h-11 w-full rounded-lg border px-3">${openingBalance?.outstanding>0?`<option value="opening:${openingBalance.id}">Opening balance · ${money(openingBalance.outstanding,openingBalance.currency)} due</option>`:""}${unpaid.map(s=>`<option value="${s.id}">#${s.id} · ${money(s.outstanding,s.currency)} due</option>`).join('')}</select></label>${amountField('Amount received','amount')}<label class="text-xs">Payment method<select name="payment" class="mt-2 h-11 w-full rounded-lg border px-3"><option value="cash">Cash</option><option value="card">Card</option></select></label>${optionalCustomerField('Note (optional)','note','',500)}<button ${!session || pendingCollection?'disabled':''} class="rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">Record payment</button><p class="text-xs text-gray-500">${session?'Record the amount actually received. Partial payments are accepted.':'Open a register session to collect payment.'}</p></form>`;
   body += table(['Receipt','Date','Payment','Total','Returned','Paid (net)','Remaining',''],history.map(s=>`<tr class="border-b"><td class="p-4">#${s.id}</td><td class="p-4">${new Date(s.created).toLocaleString()}</td><td class="p-4">${s.payment==='credit'?'Pay later':escapeHTML(s.payment)}</td><td class="p-4">${money(s.total,s.currency)}</td><td class="p-4">${money(s.refunded,s.currency)}</td><td class="p-4">${money(s.paidAmount,s.currency)}</td><td class="p-4">${money(s.outstanding,s.currency)}</td><td class="p-4"><button data-receipt="${s.id}" class="text-orange-600">Receipt</button></td></tr>`).join(''));
-  body += '<h3 class="mb-3 mt-6 font-semibold">Payment history</h3>'+table(['Date','Receipt','Amount','Method','Staff','Note'],payments.map(p=>`<tr class="border-b"><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4">#${p.saleId}</td><td class="p-4">${money(p.amount,p.currency)}</td><td class="p-4">${escapeHTML(p.payment)}</td><td class="p-4">${escapeHTML(p.cashierEmail)}</td><td class="p-4">${escapeHTML(p.note)}</td></tr>`).join(''));
+  body += '<h3 class="mb-3 mt-6 font-semibold">Payment history</h3>'+table(['Date','Receipt','Amount','Method','Staff','Note'],payments.map(p=>`<tr class="border-b"><td class="p-4">${new Date(p.created).toLocaleString()}</td><td class="p-4">${p.openingBalanceId?"Opening balance":"#"+p.saleId}</td><td class="p-4">${money(p.amount,p.currency)}</td><td class="p-4">${escapeHTML(p.payment)}</td><td class="p-4">${escapeHTML(p.cashierEmail)}</td><td class="p-4">${escapeHTML(p.note)}</td></tr>`).join(''));
   return body;
 }
 async function sendCustomerPayment() {
@@ -57,23 +61,43 @@ $("#other-page").addEventListener('submit',async e=>{
   const button=form.querySelector('button');button.disabled=true;form.dataset.saving='true';
   try {
     if(kind==='customer'){
-      await api(form.dataset.id?`/api/customers/${form.dataset.id}`:'/api/customers',{...jsonRequest(data),method:form.dataset.id?'PUT':'POST'});
-      editingCustomer=null; await loadPage(); toast('Customer saved');
+      if (form.dataset.id) {
+        await api(`/api/customers/${form.dataset.id}`,{...jsonRequest(data),method:'PUT'});
+        editingCustomer=null; await loadPage(); toast('Customer saved');
+      } else {
+        if(pendingCustomerCreate)throw Error('Recover the pending customer save first');
+        const request={...data,openingBalance:minorUnits(data.openingBalance),openingCurrency:settings.currency,requestId:crypto.randomUUID()};
+        localStorage.setItem(customerCreateKey(),JSON.stringify(request));pendingCustomerCreate=request;
+        await sendCustomerCreate();
+      }
     } else {
       if(pendingCollection)throw Error('Recover the pending payment first');
       if(!session)throw Error('Open a register session first');
-      const amount=minorUnits(data.amount),sale=customerAccount.sales.find(s=>s.id===Number(data.saleId));
+      const opening = data.saleId.startsWith('opening:');
+      const amount=minorUnits(data.amount),sale=opening?customerAccount.openingBalance:customerAccount.sales.find(s=>s.id===Number(data.saleId));
       if(!sale || amount<=0 || amount>sale.outstanding)throw Error('Enter an amount between zero and the remaining balance');
       if(sale.currency!==session.currency)throw Error('The register currency must match the receipt');
-      const pending={customerId:Number(form.dataset.customerId),request:{requestId:crypto.randomUUID(),saleId:sale.id,sessionId:session.id,amount,payment:data.payment,note:data.note}};
+      const pending={customerId:Number(form.dataset.customerId),request:{requestId:crypto.randomUUID(),...(opening?{openingBalanceId:sale.id}:{saleId:sale.id}),sessionId:session.id,amount,payment:data.payment,note:data.note}};
       localStorage.setItem(collectionKey(),JSON.stringify(pending));pendingCollection=pending;
       await sendCustomerPayment();
     }
-  }catch(error){toast(error.message);if(kind==='customer-payment' && pendingCollection)renderOther();}
+  }catch(error){toast(error.message);if((kind==='customer-payment' && pendingCollection)||(kind==='customer' && pendingCustomerCreate))renderOther();}
   finally{delete form.dataset.saving;button.disabled=false;}
 });
 document.addEventListener('click',async e=>{
-  const edit=e.target.closest('[data-edit-customer]'),cancel=e.target.closest('[data-cancel-customer]'),recover=e.target.closest('[data-recover-collection]');
+  const edit=e.target.closest('[data-edit-customer]'),cancel=e.target.closest('[data-cancel-customer]'),recover=e.target.closest('[data-recover-collection]'),recoverCustomer=e.target.closest('[data-recover-customer]');
+  if(recoverCustomer && !recoverCustomer.disabled){recoverCustomer.disabled=true;try{await sendCustomerCreate();}catch(error){toast(error.message);}finally{recoverCustomer.disabled=false;}}
   if(edit||cancel){editingCustomer=edit?Number(edit.dataset.editCustomer):null;renderOther();}
   if(recover && !recover.disabled){recover.disabled=true;try{await sendCustomerPayment();}catch(error){toast(error.message);}finally{recover.disabled=false;}}
 });
+
+async function sendCustomerCreate() {
+  try {
+    await api('/api/customers',jsonRequest(pendingCustomerCreate));
+    localStorage.removeItem(customerCreateKey()); pendingCustomerCreate=null;
+    editingCustomer=null; await loadPage(); toast('Customer saved');
+  } catch(error) {
+    if ([400,403,409].includes(error.status)) {localStorage.removeItem(customerCreateKey());pendingCustomerCreate=null;renderOther();}
+    throw error;
+  }
+}

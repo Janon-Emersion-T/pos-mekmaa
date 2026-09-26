@@ -55,7 +55,7 @@ Prices use integer hundredths. Admins and superadmins can choose the store curre
 
 ## Products and navigation
 
-Customers are contact records, separate from staff accounts, and never need a login. Use **Customers** to add/edit contact details and view purchases, balances by currency, and payment history. At checkout, select a customer and choose **Buy now, pay later**; enter zero or a partial cash/card payment. Walk-in sales continue to support cash and card.
+Customers are contact records, separate from staff accounts, and never need a login. When adding a customer, enter **Already owed / opening balance** for unpaid purchases made before using the system (zero by default). It is saved in the current store currency without creating a sale or changing stock/register cash. Collect it from the customer account by selecting **Opening balance**; cash/card installments use the same payment history and register rules as other collections. Editing contact details does not change the original debt. Use **Customers** to add/edit contact details and view purchases, balances by currency, and payment history. At checkout, select a customer and choose **Buy now, pay later**; enter zero or a partial cash/card payment. Walk-in sales continue to support cash and card.
 
 Collect later payments from the customer's account against an unpaid receipt. Collections require an open register in the receipt's currency. Only actual cash collections increase the current register's expected cash; credit sales and card collections do not. Daily reports separate credit sales from cash/card collections to avoid counting revenue twice. Returns cancel unpaid debt first, then refund any paid excess. Sales with payments cannot be deleted, preserving their payment history.
 
