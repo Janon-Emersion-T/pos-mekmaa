@@ -51,7 +51,7 @@ npm test
 
 These tests use a local server with fixture API responses. Set `TEST_DATABASE_URL` to a disposable PostgreSQL database when running `go test ./...` to include the database integration tests.
 
-Prices use integer hundredths. Admins and superadmins can choose the store currency in Settings (USD by default; includes LKR, INR, EUR, GBP, AUD, CAD, SGD, AED, and SAR). The selection is saved in PostgreSQL and shared by all staff. It applies to all displayed amounts, including history, without converting numeric values. Supported currencies use two decimal places. Open a register session before checkout. Cash sales and petty-cash movements feed its expected closing cash. Purchases increase inventory; sales reduce it; adjustments require a reason. These operations are transactional and leave an inventory movement trail. Card payments remain manual records and no money is charged. Add authentication, authorization, backups, refunds, and a payment processor before public or production use.
+Prices use integer hundredths. Admins and superadmins can choose the store currency in Settings (USD by default; includes LKR, INR, EUR, GBP, AUD, CAD, SGD, AED, and SAR). The selection is saved in PostgreSQL and shared by all staff. It applies to all displayed amounts, including history, without converting numeric values. Supported currencies use two decimal places. Each staff member must open their own register session before checkout. Multiple staff can work at once, with one open session per user. Sales, collections, refunds, petty cash, and closing use the logged-in user’s session; another user’s open session does not enable selling. Close all staff sessions before changing the store currency. Cash sales and petty-cash movements feed its expected closing cash. Purchases increase inventory; sales reduce it; adjustments require a reason. These operations are transactional and leave an inventory movement trail. Card payments remain manual records and no money is charged. Add authentication, authorization, backups, refunds, and a payment processor before public or production use.
 
 ## Products and navigation
 
@@ -73,7 +73,7 @@ Only superadmins see **Delete sale** in Sales history, and the API enforces the 
 
 ## Register sessions and staff tracking
 
-The store uses one shared open register session. Every sale is linked to that session and the authenticated staff member who completes it. The POS blocks checkout until a session is open and shows the session, opener, and current cashier. Confirmation and receipts include the cashier and session; Sales history shows staff IDs and offers session links to filter sales.
+Each staff member has their own open register session. Every new sale must use the authenticated staff member’s session, even when another staff member already has one open. The POS blocks checkout until the current user opens their session and shows its details. Staff cannot close another user’s session. Confirmation and receipts include the cashier and session; Sales history shows staff IDs and offers session links to filter sales.
 
 Register session history shows opening/closing staff and times, sale counts and totals, counted cash, expected cash at close, and differences. New sales and session actions save staff email snapshots alongside user IDs. Legacy records without staff attribution display “Not recorded”; attribution is not invented. Closing cash expectations from before this feature are also shown as not recorded.
 

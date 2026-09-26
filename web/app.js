@@ -174,10 +174,10 @@ function renderCart() {
   }
   $("#register-dot").classList.toggle("bg-green-500", Boolean(session));
   $("#register-dot").classList.toggle("bg-gray-400", !session);
-  $("#register-status").textContent = session ? `Register #${session.id} open` : "Register closed";
+  $("#register-status").textContent = session ? `Register #${session.id} open` : "Your register is closed";
   $("#session-notice").innerHTML = session
     ? `<p class="font-medium">Session #${session.id} · ${escapeHTML(currentUser?.email || "")}</p><p>Opened by ${escapeHTML(session.openedByEmail)} · ${new Date(session.openedAt).toLocaleString()}</p>`
-    : '<p class="font-medium">Open a register session to complete a sale.</p><a href="/session" data-page="session" class="text-orange-600">Open register →</a>';
+    : '<p class="font-medium">Open your own register session to complete a sale.</p><a href="/session" data-page="session" class="text-orange-600">Open register →</a>';
   renderCustomerPicker();
   if (pendingCheckout) $("#session-notice").innerHTML = '<p class="font-medium">A checkout is awaiting confirmation.</p><p>Recover it before starting another sale. Retrying will not duplicate the sale.</p>';
 }
@@ -279,7 +279,7 @@ function renderOther() {
     desc = "Manage preferences for this store.";
     body = `<form data-form="settings" class="max-w-md rounded-xl border bg-white p-5">
       <h2 class="font-semibold">Store currency</h2>
-      <p class="mt-2 text-xs leading-5 text-gray-500">Used for new prices and transactions. Existing sales keep their recorded currency. Close the register before changing currency. Product prices are not converted.</p>
+      <p class="mt-2 text-xs leading-5 text-gray-500">Used for new prices and transactions. Existing sales keep their recorded currency. Close all staff register sessions before changing currency. Product prices are not converted.</p>
       <label class="mt-5 block text-xs font-medium text-gray-600">Currency
         <select name="currency" required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3">
           ${settings.currencies.map((c) => `<option value="${c.code}" ${c.code === settings.currency ? "selected" : ""}>${c.code} — ${c.name}</option>`).join("")}
@@ -318,7 +318,7 @@ function renderOther() {
   } else if (page === "session") {
     title = "Register session";
     desc =
-      "Open the till before selling. Expected cash includes cash sales and petty cash movements.";
+      "Open your own register session before selling. Each staff member has a separate session and cash balance.";
     body = session
       ? `<div class="grid gap-4 sm:grid-cols-3">${[
           ["Session", "#" + session.id],
@@ -809,7 +809,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       .slice(0, 2)
       .toUpperCase();
     await navigate(pageFromURL(), false, location.search);
-    if (!session) toast("Open a register session before making sales");
+    if (!session) toast("Open your own register session before making sales");
   } catch (e) {
     $("#products").innerHTML =
       '<p class="col-span-full py-16 text-center text-sm text-red-500">Could not load the menu. Please reload to try again.</p>';

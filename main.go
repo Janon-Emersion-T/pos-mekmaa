@@ -211,9 +211,9 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 func (s *Server) activeSession(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) (Session, error) {
+}, userID int64) (Session, error) {
 	var x Session
-	err := scanSession(q.QueryRowContext(ctx, sessionColumns+"WHERE r.status='open' ORDER BY r.id DESC LIMIT 1"), &x)
+	err := scanSession(q.QueryRowContext(ctx, sessionColumns+"WHERE r.status='open' AND r.opened_by=$1 ORDER BY r.id DESC LIMIT 1", userID), &x)
 	return x, err
 }
 
@@ -279,7 +279,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if opened && old != req.Currency {
-		problem(w, 409, "Close the register before changing currency")
+		problem(w, 409, "Close all staff register sessions before changing currency")
 		return
 	}
 	if auditActor(r.Context(), tx, principal(r)) != nil {
@@ -370,9 +370,9 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not record actor")
 		return
 	}
-	session, err := s.lockedSession(r.Context(), tx)
+	session, err := s.lockedSession(r.Context(), tx, principal(r).ID)
 	if errors.Is(err, sql.ErrNoRows) {
-		problem(w, 409, "Open a register session before making a sale")
+		problem(w, 409, "Open your own register session before making a sale")
 		return
 	}
 	if err != nil {
@@ -490,7 +490,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		x, err := s.activeSession(r.Context(), s.db)
+		x, err := s.activeSession(r.Context(), s.db, principal(r).ID)
 		if errors.Is(err, sql.ErrNoRows) {
 			respond(w, 200, nil)
 			return
@@ -533,7 +533,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		var id int64
 		err = tx.QueryRowContext(r.Context(), `INSERT INTO register_sessions(opening_cash,opened_by,opened_by_email,currency) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id`, req.OpeningCash, principal(r).ID, principal(r).Email, currency).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
-			problem(w, 409, "A register session is already open")
+			problem(w, 409, "You already have an open register session")
 			return
 		}
 		if err != nil || tx.Commit() != nil {
@@ -553,9 +553,9 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not record actor")
 		return
 	}
-	x, err := s.lockedSession(r.Context(), tx)
+	x, err := s.lockedSession(r.Context(), tx, principal(r).ID)
 	if err != nil {
-		problem(w, 409, "No register session is open")
+		problem(w, 409, "You do not have an open register session")
 		return
 	}
 	if req.SessionID != nil && *req.SessionID != x.ID {
@@ -614,9 +614,9 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not record actor")
 		return
 	}
-	x, err := s.lockedSession(r.Context(), tx)
+	x, err := s.lockedSession(r.Context(), tx, principal(r).ID)
 	if err != nil {
-		problem(w, 409, "Open a register session first")
+		problem(w, 409, "Open your own register session first")
 		return
 	}
 	var id int64

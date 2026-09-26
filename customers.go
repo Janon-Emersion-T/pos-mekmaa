@@ -312,9 +312,9 @@ func (s *Server) collectCustomerPayment(w http.ResponseWriter, r *http.Request) 
 		problem(w, 500, "Could not record actor")
 		return
 	}
-	session, err := s.lockedSession(r.Context(), tx)
+	session, err := s.lockedSession(r.Context(), tx, principal(r).ID)
 	if err != nil {
-		problem(w, 409, "Open a register session before collecting a payment")
+		problem(w, 409, "Open your own register session before collecting a payment")
 		return
 	}
 	if req.SessionID != session.ID {

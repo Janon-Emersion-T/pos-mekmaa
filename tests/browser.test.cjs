@@ -292,3 +292,28 @@ test('customer account can collect an opening balance without a sales receipt',a
   assert.equal(request.openingBalanceId,4);assert.equal(request.saleId,undefined);assert.equal(request.amount,2500);
   assert.deepEqual(errors,[]);
 });
+test('checkout stays disabled until the current user opens their own session',async t=>{
+  let ownSession=null;
+  const {page,errors,requests}=await setup(t,{handle:async(route,pathname)=>{
+    if(pathname==='/api/session'){await route.fulfill({json:ownSession});return true;}
+    if(pathname==='/api/sessions'){await route.fulfill({json:[{...register,id:42,openedBy:2,openedByEmail:'other@example.test',status:'open',saleCount:0,salesTotal:0}]});return true;}
+    if(pathname==='/api/session/open'){ownSession={...register,id:43,openedBy:1};await route.fulfill({status:201,json:{id:43}});return true;}
+    return false;
+  }});
+  await ready(page);
+  await page.locator('[data-product="1"]').click();
+  assert.equal(await page.locator('#checkout').isDisabled(),true);
+  assert.match(await page.locator('#session-notice').innerText(),/Open your own register session/);
+  await page.evaluate(()=>navigate('session'));
+  assert.equal(await page.locator('[data-form=open-session]').count(),1);
+  assert.equal(await page.locator('[data-form=close-session]').count(),0);
+  await page.locator('[data-form=open-session] button').click();
+  await page.locator('[data-form=close-session]').waitFor();
+  await page.evaluate(()=>navigate('pos'));
+  assert.equal(await page.locator('#checkout').isEnabled(),true);
+  page.once('dialog',dialog=>dialog.accept('130.00'));
+  await page.locator('#checkout').click();
+  await page.locator('#receipt-dialog').waitFor({state:'visible'});
+  assert.equal(requests.find(r=>r.path==='/api/checkout').body.sessionId,43);
+  assert.deepEqual(errors,[]);
+});

@@ -70,9 +70,9 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 	if w := call(s.checkout, cashier, "POST", "/api/checkout", order("session-not-open-checkout")); w.Code != 409 {
 		t.Fatalf("sale without session: %d", w.Code)
 	}
-	open := func() int64 {
+	open := func(actor *User) int64 {
 		t.Helper()
-		w := call(s.sessions, opener, "POST", "/api/session/open", `{"openingCash":1000}`)
+		w := call(s.sessions, actor, "POST", "/api/session/open", `{"openingCash":1000}`)
 		if w.Code != 201 {
 			t.Fatalf("open: %d %s", w.Code, w.Body.String())
 		}
@@ -80,7 +80,35 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 		json.Unmarshal(w.Body.Bytes(), &result)
 		return result.ID
 	}
-	sessionID := open()
+	foreignID := open(opener)
+	assertStatus := func(w *httptest.ResponseRecorder, status int) {
+		t.Helper()
+		if w.Code != status {
+			t.Fatalf("got %d want %d: %s", w.Code, status, w.Body.String())
+		}
+	}
+	assertStatus(call(s.sessions, opener, "POST", "/api/session/open", `{"openingCash":0}`), 409)
+	own := call(s.sessions, cashier, "GET", "/api/session", "")
+	assertStatus(own, 200)
+	if strings.TrimSpace(own.Body.String()) != "null" {
+		t.Fatalf("cashier can see another user's active register: %s", own.Body.String())
+	}
+	assertStatus(call(s.checkout, cashier, "POST", "/api/checkout", order("session-other-user-open")), 409)
+	assertStatus(call(s.checkout, cashier, "POST", "/api/checkout", strings.TrimSuffix(order("session-other-id-attempt"), "}")+fmt.Sprintf(`,"sessionId":%d}`, foreignID)), 409)
+	assertStatus(call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1000,"sessionId":%d}`, foreignID)), 409)
+	assertStatus(call(s.pettyCash, cashier, "POST", "/api/petty-cash", `{"direction":"in","amount":100,"category":"Test"}`), 409)
+	sessionID := open(cashier)
+	assertStatus(call(s.sessions, cashier, "POST", "/api/session/open", `{"openingCash":0}`), 409)
+	assertStatus(call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1000,"sessionId":%d}`, foreignID)), 409)
+	assertStatus(call(s.checkout, cashier, "POST", "/api/checkout", strings.TrimSuffix(order("session-wrong-id-with-own"), "}")+fmt.Sprintf(`,"sessionId":%d}`, foreignID)), 409)
+	own = call(s.sessions, cashier, "GET", "/api/session", "")
+	var current Session
+	if err = json.Unmarshal(own.Body.Bytes(), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.ID != sessionID || current.OpenedBy != cashierID {
+		t.Fatalf("wrong active session: %+v", current)
+	}
 	w := call(s.checkout, cashier, "POST", "/api/checkout", order("session-initial-checkout"))
 	if w.Code != 201 {
 		t.Fatalf("checkout: %d %s", w.Code, w.Body.String())
@@ -103,7 +131,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 	if len(sales) != 1 || sales[0].CashierEmail != "cashier@example.com" {
 		t.Fatalf("cashier snapshot changed: %+v", sales)
 	}
-	w = call(s.sessions, opener, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d}`, sessionID))
+	w = call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d}`, sessionID))
 	if w.Code != 200 {
 		t.Fatalf("close: %s", w.Body.String())
 	}
@@ -116,11 +144,11 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 	if err = json.Unmarshal(w.Body.Bytes(), &history); err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 || history[0].OpenedBy != openerID || history[0].ClosedBy != openerID || history[0].ClosingExpectedCash == nil || *history[0].ClosingExpectedCash != 1450 || history[0].SaleCount != 1 {
+	if len(history) != 2 || history[0].OpenedBy != cashierID || history[0].ClosedBy != cashierID || history[0].ClosingExpectedCash == nil || *history[0].ClosingExpectedCash != 1450 || history[0].SaleCount != 1 {
 		t.Fatalf("history: %+v", history)
 	}
 	for i := 0; i < 5; i++ {
-		id := open()
+		id := open(cashier)
 		stale := strings.TrimSuffix(order(fmt.Sprintf("session-stale-checkout-%d", i)), "}") + fmt.Sprintf(`,"sessionId":%d}`, sessionID)
 		if w = call(s.checkout, cashier, "POST", "/api/checkout", stale); w.Code != 409 {
 			t.Fatalf("stale session accepted: %d", w.Code)
@@ -138,7 +166,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			closeResult = call(s.sessions, opener, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d}`, id))
+			closeResult = call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d}`, id))
 		}()
 		close(start)
 		wg.Wait()
@@ -153,4 +181,39 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 			t.Fatalf("sale omitted from close: expected=%d total=%d", expected, total)
 		}
 	}
+	// The other staff member's session remains open and has independent totals.
+	own = call(s.sessions, opener, "GET", "/api/session", "")
+	if err = json.Unmarshal(own.Body.Bytes(), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.ID != foreignID || current.ExpectedCash != 1000 {
+		t.Fatalf("other user's register changed: %+v", current)
+	}
+	assertStatus(call(s.checkout, opener, "POST", "/api/checkout", order("session-opener-own-sale")), 201)
+	own = call(s.sessions, opener, "GET", "/api/session", "")
+	if err = json.Unmarshal(own.Body.Bytes(), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.ExpectedCash != 1450 {
+		t.Fatalf("opener cash=%d", current.ExpectedCash)
+	}
+	assertStatus(call(s.updateSettings, opener, "PUT", "/api/settings", `{"currency":"LKR"}`), 409)
+	// Completed retries may recover a receipt after closing, but do not create a new sale.
+	assertStatus(call(s.checkout, cashier, "POST", "/api/checkout", order("session-initial-checkout")), 200)
+	assertStatus(call(s.sessions, opener, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d}`, foreignID)), 200)
+	// Simultaneous attempts by the same user must open exactly one session.
+	var opened [2]*httptest.ResponseRecorder
+	var openWG sync.WaitGroup
+	for i := range opened {
+		openWG.Add(1)
+		go func(i int) {
+			defer openWG.Done()
+			opened[i] = call(s.sessions, cashier, "POST", "/api/session/open", `{"openingCash":0}`)
+		}(i)
+	}
+	openWG.Wait()
+	if !((opened[0].Code == 201 && opened[1].Code == 409) || (opened[1].Code == 201 && opened[0].Code == 409)) {
+		t.Fatalf("duplicate session opens: %d/%d", opened[0].Code, opened[1].Code)
+	}
+
 }

@@ -18,14 +18,14 @@ func scanSession(row interface{ Scan(...any) error }, x *Session) error {
 		&x.OpenedBy, &x.OpenedByEmail, &x.ClosedBy, &x.ClosedByEmail, &x.ClosingExpectedCash, &x.SaleCount, &x.SalesTotal, &x.Currency, &x.RefundTotal)
 }
 
-// Hold the register row until commit so checkout, cash movements, and closing
+// Hold this user's register row until commit so checkout, cash movements, and closing
 // serialize. Read aggregates in a new statement after acquiring the lock.
-func (s *Server) lockedSession(ctx context.Context, tx *sql.Tx) (Session, error) {
+func (s *Server) lockedSession(ctx context.Context, tx *sql.Tx, userID int64) (Session, error) {
 	var id int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM register_sessions WHERE status='open' ORDER BY id DESC LIMIT 1 FOR UPDATE`).Scan(&id); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM register_sessions WHERE status='open' AND opened_by=$1 ORDER BY id DESC LIMIT 1 FOR UPDATE`, userID).Scan(&id); err != nil {
 		return Session{}, err
 	}
-	return s.activeSession(ctx, tx)
+	return s.activeSession(ctx, tx, userID)
 }
 
 func (s *Server) sessionHistory(w http.ResponseWriter, r *http.Request) {
