@@ -15,7 +15,7 @@ import (
 func setTestBootstrapAdmin(t *testing.T) {
 	t.Helper()
 	t.Setenv("BOOTSTRAP_ADMIN_EMAIL", "bootstrap@example.test")
-	t.Setenv("BOOTSTRAP_ADMIN_PASSWORD", "test-only-bootstrap-password")
+	t.Setenv("BOOTSTRAP_ADMIN_PASSWORD", "test-only-bootstrap@1234")
 }
 
 func TestAuthenticationGate(t *testing.T) {

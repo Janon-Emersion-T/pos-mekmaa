@@ -242,8 +242,28 @@ func finishSessionClose(w http.ResponseWriter, r *http.Request, tx *sql.Tx, x Se
 		problem(w, 400, "Explain the cash difference or administrative closure")
 		return false
 	}
+	if cash < x.ExpectedCash {
+		if _, err := recordCashShortage(
+			r.Context(),
+			tx,
+			x.OpenedBy,
+			x.ID,
+			int64(x.ExpectedCash),
+			int64(cash),
+			x.Currency,
+			reason,
+		); err != nil {
+			problem(w, 500, "Could not record cash shortage")
+			return false
+		}
+	}
+
 	_, err := tx.ExecContext(r.Context(), `UPDATE register_sessions SET status='closed',closed_at=now(),closing_cash=$1,closed_by=$2,closed_by_email=$3,closing_expected_cash=$4,closing_reason=$5 WHERE id=$6`, cash, principal(r).ID, principal(r).Email, x.ExpectedCash, reason, x.ID)
-	if err != nil || tx.Commit() != nil {
+	if err != nil {
+		problem(w, 500, "Could not close session")
+		return false
+	}
+	if err = tx.Commit(); err != nil {
 		problem(w, 500, "Could not close session")
 		return false
 	}

@@ -114,7 +114,25 @@ const userContextKey contextKey = "user"
 const minPasswordBytes = 8
 
 func validPassword(password string) bool {
-	return len(password) >= minPasswordBytes && len(password) <= 72
+	if len(password) < minPasswordBytes || len(password) > 72 {
+		return false
+	}
+
+	var letter, digit, special bool
+
+	for _, char := range password {
+		switch {
+		case char >= 'a' && char <= 'z',
+			char >= 'A' && char <= 'Z':
+			letter = true
+		case char >= '0' && char <= '9':
+			digit = true
+		default:
+			special = true
+		}
+	}
+
+	return letter && digit && special
 }
 
 type Server struct {
