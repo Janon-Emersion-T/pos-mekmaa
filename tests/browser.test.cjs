@@ -504,3 +504,73 @@ test('owner checkout sends cost price and no initial payment method', async t =>
   assert.equal(request.cashReceived,undefined);
   assert.deepEqual(errors,[]);
 });
+
+test('owner account overview shows outstanding and settlement history', async t => {
+  const owner = {
+    id:99,
+    name:'Owner',
+    phone:'',
+    email:'',
+    address:'',
+    notes:'',
+    isOwner:true,
+    balances:[{currency:'LKR',outstanding:7550,overdue:0}]
+  };
+  const ownerSale = {
+    ...sale,
+    id:55,
+    customerId:99,
+    customerName:'Owner',
+    payment:'credit',
+    total:7550,
+    paidAmount:0,
+    outstanding:7550,
+    refunded:0,
+    dueDate:'2026-11-01'
+  };
+
+  const {page,errors} = await setup(t,{
+    customers:[owner],
+    handle:async(route,pathname)=>{
+      if(pathname==='/api/customers/99'){
+        await route.fulfill({json:{
+          customer:owner,
+          sales:[ownerSale],
+          payments:[],
+          openingBalance:null
+        }});
+        return true;
+      }
+      return false;
+    }
+  });
+
+  await ready(page,'/customers');
+
+  const overview = page.locator('#owner-account-overview');
+  await overview.waitFor();
+
+  assert.match(await overview.innerText(),/Owner account/i);
+  assert.match(await overview.innerText(),/75\.50/);
+  assert.match(await overview.innerText(),/cost price/);
+
+  await overview.locator('a').click();
+
+  await page.locator('#customer-account').waitFor();
+  assert.match(
+    await page.locator('#customer-account').innerText(),
+    /Owner.*Cost-price credit account/
+  );
+
+  assert.match(
+    await page.locator('#other-page').innerText(),
+    /Payment history/
+  );
+
+  assert.match(
+    await page.locator('#other-page').innerText(),
+    /Collect payment/
+  );
+
+  assert.deepEqual(errors,[]);
+});

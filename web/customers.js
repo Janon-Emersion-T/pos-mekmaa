@@ -39,6 +39,31 @@ function customersView() {
   const balances = c => c.balances.length ? c.balances.map(b=>money(b.outstanding,b.currency)+(b.overdue>0?' ('+money(b.overdue,b.currency)+' overdue)':'')).join(' · ') : 'No outstanding balance';
   let body = `<form data-form="customer" data-id="${editing?.id || ''}" class="mb-5 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3"><h2 class="font-semibold sm:col-span-3">${editing?'Edit customer':'Add customer'}</h2>${field('Customer name','name','text',editing?.name || '')}${optionalCustomerField('Phone (optional)','phone',editing?.phone,50,'tel')}${optionalCustomerField('Email (optional)','email',editing?.email,254,'email')}${optionalCustomerField('Address (optional)','address',editing?.address,500)}${optionalCustomerField('Notes (optional)','notes',editing?.notes,1000)}${!editing ? amountField('Already owed / opening balance','openingBalance','0.00')+optionalCustomerField('Opening balance due date (optional)','openingDueDate','',10,'date')+'<p class="text-xs text-gray-500 sm:col-span-3">Enter money owed from before using this system. Leave zero for a new customer. This does not count as a new sale or cash received.</p>' : ''}<div class="flex items-center gap-3"><button ${pendingCustomerCreate && !editing?'disabled':''} class="rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">${editing?'Save customer':'Add customer'}</button>${editing?'<button type="button" data-cancel-customer class="text-sm">Cancel</button>':''}</div></form>`;
   if (pendingCustomerCreate) body += '<div class="mb-5 rounded-lg border bg-orange-50 p-4 text-sm">A customer save is awaiting confirmation.<button data-recover-customer class="ml-3 text-orange-600">Recover customer save</button></div>';
+  const owner = customers.find(c=>c.isOwner);
+  if (owner) {
+    const ownerBalances = owner.balances || [];
+    const ownerOutstanding = ownerBalances.length
+      ? ownerBalances.map(b=>money(b.outstanding,b.currency)).join(' · ')
+      : money(0,settings.currency);
+    const ownerOverdue = ownerBalances
+      .filter(b=>b.overdue>0)
+      .map(b=>money(b.overdue,b.currency))
+      .join(' · ');
+    body += `<section id="owner-account-overview" class="mb-5 rounded-xl border border-orange-200 bg-orange-50 p-5">
+      <div class="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <p class="text-xs font-semibold uppercase tracking-wide text-orange-700">Owner account</p>
+          <h3 class="mt-1 text-xl font-semibold">Outstanding: ${ownerOutstanding}</h3>
+          <p class="mt-2 text-sm text-gray-600">Purchases are charged at cost price and recorded as credit.</p>
+          ${ownerOverdue ? `<p class="mt-2 text-sm font-medium text-red-700">Overdue: ${ownerOverdue}</p>` : ''}
+        </div>
+        <a href="/customers?id=${owner.id}" data-page="customers"
+           class="rounded-lg bg-orange-600 px-4 py-3 text-sm font-semibold text-white">
+          View purchases and settlements
+        </a>
+      </div>
+    </section>`;
+  }
   body += filterForm('customer-filter',filterInput('Search name, phone, or email','q'));
   body += table(['Customer','Phone','Email','Outstanding','Actions'],filtered.map(c=>`<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(c.name)} <span class="text-xs text-gray-400">#${c.id}</span></td><td class="p-4">${escapeHTML(c.phone)}</td><td class="p-4">${escapeHTML(c.email)}</td><td class="p-4">${balances(c)}</td><td class="p-4"><a href="/customers?id=${c.id}&collect=1" data-page="customers" class="mr-3 font-semibold text-orange-600">Collect payment</a><a href="/customers?id=${c.id}" data-page="customers" class="mr-3 text-orange-600">Account</a><button data-edit-customer="${c.id}" class="text-orange-600">Edit</button></td></tr>`).join(''));
   try { pendingCollection = JSON.parse(localStorage.getItem(collectionKey()) || 'null'); } catch { /* Keep any in-memory pending request. */ }
@@ -47,7 +72,7 @@ function customersView() {
   const {customer,sales:history,payments,openingBalance} = customerAccount;
   const summary = customers.find(c=>c.id===customer.id) || customer;
   const unpaid = history.filter(s=>s.payment==='credit' && s.outstanding>0);
-  body += `<h2 id="customer-account" class="mb-3 mt-7 text-xl font-semibold">${escapeHTML(customer.name)} · Account</h2><p class="mb-4 text-sm">${balances(summary)}</p><p class="mb-4 text-xs text-gray-500">${escapeHTML(customer.address)}${customer.notes ? ' · '+escapeHTML(customer.notes) : ''}</p>`;
+  body += `<h2 id="customer-account" class="mb-3 mt-7 text-xl font-semibold">${customer.isOwner ? 'Owner · Cost-price credit account' : escapeHTML(customer.name)+' · Account'}</h2><p class="mb-4 text-sm">${balances(summary)}</p><p class="mb-4 text-xs text-gray-500">${escapeHTML(customer.address)}${customer.notes ? ' · '+escapeHTML(customer.notes) : ''}</p>`;
   body += customerControls(customer,openingBalance);
   if (openingBalance) body += `<div class="mb-5 rounded-xl border bg-white p-5"><h3 class="font-semibold">Opening balance · Previous purchases</h3><p class="mt-2 text-sm">Originally owed: ${money(openingBalance.originalAmount ?? openingBalance.amount,openingBalance.currency)} · Corrected total: ${money(openingBalance.amount,openingBalance.currency)} · Due: ${escapeHTML(openingBalance.dueDate || "Not set")} · Paid: ${money(openingBalance.paidAmount,openingBalance.currency)} · Remaining: ${money(openingBalance.outstanding,openingBalance.currency)}</p></div>`;
   if (unpaid.length || openingBalance?.outstanding > 0) body += `<form data-form="customer-payment" data-customer-id="${customer.id}" class="mb-5 grid gap-4 rounded-xl border bg-white p-5 sm:grid-cols-3"><h3 class="font-semibold sm:col-span-3">Collect payment</h3><label class="text-xs">Pay towards<select name="saleId" required class="mt-2 h-11 w-full rounded-lg border px-3">${openingBalance?.outstanding>0?`<option value="opening:${openingBalance.id}">Opening balance · ${money(openingBalance.outstanding,openingBalance.currency)} due</option>`:""}${unpaid.map(s=>`<option value="${s.id}">#${s.id} · ${money(s.outstanding,s.currency)} due</option>`).join('')}</select></label>${amountField('Amount received','amount')}<label class="text-xs">Payment method<select name="payment" class="mt-2 h-11 w-full rounded-lg border px-3"><option value="cash">Cash</option><option value="card">Card</option></select></label>${optionalCustomerField('Note (optional)','note','',500)}<button ${!session || pendingCollection?'disabled':''} class="rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">Collect payment</button><p class="text-xs text-gray-500">${session?'Record the amount actually received. Partial payments are accepted.':'Open your own register session to collect payment.'}</p></form>`;
