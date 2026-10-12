@@ -8,13 +8,25 @@ function renderCustomerPicker() {
   selector.innerHTML = '<option value="">Walk-in customer</option>' + customers.map(c=>`<option value="${c.id}">${escapeHTML(c.name)}${c.phone ? ' · '+escapeHTML(c.phone) : ''} (#${c.id})</option>`).join("");
   selector.value = selected || "";
   selector.disabled = busy || Boolean(pendingCheckout);
+  if (ownerSelected() && !pendingCheckout && payment !== "credit") {
+    selectPaymentMode("credit");
+  }
   $("#credit-options").classList.toggle("hidden", payment !== "credit");
+  $("#credit-initial-payment").readOnly = ownerSelected();
+  $("#credit-initial-method").disabled = ownerSelected() || busy || Boolean(pendingCheckout);
   $("#credit-initial-payment").disabled = $("#credit-initial-method").disabled = busy || Boolean(pendingCheckout);
-  const total = [...cart].reduce((sum,[id,qty])=>sum+(products.find(p=>p.id===id)?.price || 0)*qty,0);
+  const total = [...cart].reduce((sum,[id,qty])=>sum+(products.find(p=>p.id===id) ? checkoutUnitPrice(products.find(p=>p.id===id)) : 0)*qty,0);
   const initial = Math.round(Number($("#credit-initial-payment").value)*100);
   $("#credit-remaining").textContent = money(Math.max(0,total-(Number.isFinite(initial)?initial:0)));
 }
-$("#checkout-customer").onchange = e => {selectedCustomer = e.target.value ? Number(e.target.value) : null;};
+$("#checkout-customer").onchange = e => {
+  selectedCustomer = e.target.value ? Number(e.target.value) : null;
+  if (ownerSelected()) {
+    selectPaymentMode("credit");
+    $("#credit-initial-payment").value = "0.00";
+  }
+  renderCart();
+};
 $("#credit-initial-payment").oninput = renderCustomerPicker;
 function optionalCustomerField(label,name,value,max,type="text") {
   return `<label class="text-xs text-gray-600">${label}<input name="${name}" type="${type}" maxlength="${max}" value="${escapeHTML(value || '')}" class="mt-2 h-11 w-full rounded-lg border px-3"></label>`;

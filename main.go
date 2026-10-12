@@ -421,11 +421,12 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var customerName string
+	var ownerCheckout bool
 	var creditLimit *int
 	var creditCurrency string
 	var termsDays int
 	if req.CustomerID != nil {
-		err = tx.QueryRowContext(r.Context(), `SELECT name,credit_limit,credit_currency,payment_terms_days FROM customers WHERE id=$1 FOR UPDATE`, *req.CustomerID).Scan(&customerName, &creditLimit, &creditCurrency, &termsDays)
+		err = tx.QueryRowContext(r.Context(), `SELECT name,credit_limit,credit_currency,payment_terms_days,is_owner FROM customers WHERE id=$1 FOR UPDATE`, *req.CustomerID).Scan(&customerName, &creditLimit, &creditCurrency, &termsDays, &ownerCheckout)
 		if errors.Is(err, sql.ErrNoRows) {
 			problem(w, 400, "Customer not found")
 			return
@@ -434,6 +435,13 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, "Could not load customer")
 			return
 		}
+	}
+	if ownerCheckout && (req.Payment != "credit" ||
+		req.InitialPayment != 0 ||
+		req.InitialPaymentMethod != "" ||
+		req.CashReceived != nil) {
+		problem(w, 400, "Owner orders must use buy now, pay later with no initial payment")
+		return
 	}
 	total := 0
 	type item struct {
@@ -450,7 +458,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		var x item
 		x.Line = line
 		var stock int
-		if err = tx.QueryRowContext(r.Context(), `SELECT name,price,stock FROM products WHERE id=$1 AND active FOR UPDATE`, line.ProductID).Scan(&x.Name, &x.Price, &stock); err != nil {
+		if err = tx.QueryRowContext(r.Context(), `SELECT name,CASE WHEN $2 THEN cost ELSE price END,stock FROM products WHERE id=$1 AND active FOR UPDATE`, line.ProductID, ownerCheckout).Scan(&x.Name, &x.Price, &stock); err != nil {
 			problem(w, 400, "Product not found")
 			return
 		}

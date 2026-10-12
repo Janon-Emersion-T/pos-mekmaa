@@ -62,7 +62,7 @@ $("#checkout").onclick = async () => {
     if (!pendingCheckout) {
       if (!session || !cart.size) return;
       const items = [...cart].map(([productId, quantity]) => ({productId, quantity}));
-      const expectedTotal = items.reduce((total, line) => total + products.find(p => p.id === line.productId).price*line.quantity, 0);
+      const expectedTotal = items.reduce((total, line) => total + checkoutUnitPrice(products.find(p => p.id === line.productId))*line.quantity, 0);
       let cashReceived;
       if (payment === "cash") {
         const entered = window.prompt(`Cash received (${settings.currency}). Total: ${money(expectedTotal)}`, (expectedTotal/100).toFixed(2));
@@ -73,7 +73,7 @@ $("#checkout").onclick = async () => {
       let credit = {};
       if (payment === "credit") {
         if (!selectedCustomer) throw Error("Select a customer for buy now, pay later");
-        const initialPayment = minorUnits($("#credit-initial-payment").value);
+        const initialPayment = ownerSelected() ? 0 : minorUnits($("#credit-initial-payment").value);
         if (expectedTotal <= 0 || initialPayment >= expectedTotal) throw Error("Amount paid now must be less than the total. Use cash or card for a fully paid sale");
         credit = {dueDate:$("#credit-due-date").value, initialPayment, initialPaymentMethod:$("#credit-initial-method").value};
       }

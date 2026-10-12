@@ -240,8 +240,19 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	if err = json.Unmarshal(request("GET", "/api/customers", "", 200).Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("customers=%d", len(list))
+	var ordinaryCount, ownerCount int
+	for _, c := range list {
+		if c.IsOwner {
+			ownerCount++
+			if c.Name != "Owner" {
+				t.Fatalf("unexpected owner: %+v", c)
+			}
+		} else {
+			ordinaryCount++
+		}
+	}
+	if ordinaryCount != 2 || ownerCount != 1 {
+		t.Fatalf("ordinary customers=%d owners=%d", ordinaryCount, ownerCount)
 	}
 	for _, c := range list {
 		if c.ID == customerID && (len(c.Balances) != 1 || c.Balances[0].Outstanding != 1000) {

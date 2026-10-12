@@ -149,6 +149,21 @@ function renderProducts() {
       .join("") ||
     `<p class="col-span-full py-20 text-center text-sm text-gray-400">${products.length ? "No matching products. Try another search." : "No products yet. Add products from the Products menu to start selling."}</p>`;
 }
+function ownerSelected() {
+  const id = pendingCheckout?.customerId || selectedCustomer;
+  return customers.some(c => c.id === Number(id) && c.isOwner);
+}
+function checkoutUnitPrice(p) {
+  return ownerSelected() ? p.cost : p.price;
+}
+function selectPaymentMode(next) {
+  payment = next;
+  document.querySelectorAll(".payment").forEach(el => {
+    el.classList.toggle("border-orange-300", el.dataset.payment === next);
+    el.classList.toggle("bg-orange-50", el.dataset.payment === next);
+    el.classList.toggle("text-orange-600", el.dataset.payment === next);
+  });
+}
 function renderCart() {
   for (const [id, qty] of cart) {
     const p = products.find((p) => p.id === id);
@@ -161,9 +176,9 @@ function renderCart() {
     [...cart]
       .map(([id, qty]) => {
         const p = products.find((p) => p.id === id);
-        total += p.price * qty;
+        total += checkoutUnitPrice(p) * qty;
         count += qty;
-        return `<div class="flex items-center gap-3"><div class="product-art h-14 w-14 shrink-0 rounded-lg" style="background:${escapeHTML(p.color)}">${art(p)}</div><div class="min-w-0 flex-1"><h3 class="truncate text-xs font-medium">${escapeHTML(p.name)}</h3><p class="mt-1 text-[10px] text-gray-400">${money(p.price)}</p><div class="mt-2 flex items-center gap-2"><button class="flex h-5 w-5 items-center justify-center rounded border border-gray-200 text-xs" data-delta="-1" data-id="${id}" aria-label="Remove one ${escapeHTML(p.name)}">−</button><span class="w-3 text-center text-[10px]">${qty}</span><button class="flex h-5 w-5 items-center justify-center rounded border border-gray-200 text-xs" data-delta="1" data-id="${id}" aria-label="Add one ${escapeHTML(p.name)}">+</button></div></div><span class="text-xs font-semibold">${money(p.price * qty)}</span></div>`;
+        return `<div class="flex items-center gap-3"><div class="product-art h-14 w-14 shrink-0 rounded-lg" style="background:${escapeHTML(p.color)}">${art(p)}</div><div class="min-w-0 flex-1"><h3 class="truncate text-xs font-medium">${escapeHTML(p.name)}</h3><p class="mt-1 text-[10px] text-gray-400">${money(checkoutUnitPrice(p))}</p><div class="mt-2 flex items-center gap-2"><button class="flex h-5 w-5 items-center justify-center rounded border border-gray-200 text-xs" data-delta="-1" data-id="${id}" aria-label="Remove one ${escapeHTML(p.name)}">−</button><span class="w-3 text-center text-[10px]">${qty}</span><button class="flex h-5 w-5 items-center justify-center rounded border border-gray-200 text-xs" data-delta="1" data-id="${id}" aria-label="Add one ${escapeHTML(p.name)}">+</button></div></div><span class="text-xs font-semibold">${money(checkoutUnitPrice(p) * qty)}</span></div>`;
       })
       .join("") ||
     `<div class="flex h-full min-h-52 flex-col items-center justify-center text-gray-300"><div class="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-gray-50">${icon("receipt")}</div><p class="text-sm font-medium text-gray-500">A good day starts here</p><p class="mt-2 text-[11px] text-gray-400">Choose a product to start an order.</p></div>`;
@@ -638,6 +653,10 @@ document.addEventListener("click", async (e) => {
     }
   }
   if (pay && !busy && !pendingCheckout) {
+    if (ownerSelected() && pay.dataset.payment !== "credit") {
+      toast("Owner orders must use Buy now, pay later");
+      return;
+    }
     payment = pay.dataset.payment;
     renderCart();
     document.querySelectorAll(".payment").forEach((el) => {

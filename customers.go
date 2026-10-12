@@ -21,6 +21,7 @@ type Customer struct {
 	PaymentTermsDays int               `json:"paymentTermsDays"`
 	CreditLimit      *int              `json:"creditLimit"`
 	CreditCurrency   string            `json:"creditCurrency"`
+	IsOwner          bool              `json:"isOwner"`
 	ID               int64             `json:"id"`
 	Name             string            `json:"name"`
 	Phone            string            `json:"phone"`
@@ -31,11 +32,11 @@ type Customer struct {
 	Balances         []CustomerBalance `json:"balances"`
 }
 
-const customerColumns = `SELECT id,name,phone,email,address,notes,created_at,payment_terms_days,credit_limit,credit_currency FROM customers `
+const customerColumns = `SELECT id,name,phone,email,address,notes,created_at,payment_terms_days,credit_limit,credit_currency,is_owner FROM customers `
 
 func scanCustomer(row interface{ Scan(...any) error }, c *Customer) error {
 	c.Balances = []CustomerBalance{}
-	return row.Scan(&c.ID, &c.Name, &c.Phone, &c.Email, &c.Address, &c.Notes, &c.Created, &c.PaymentTermsDays, &c.CreditLimit, &c.CreditCurrency)
+	return row.Scan(&c.ID, &c.Name, &c.Phone, &c.Email, &c.Address, &c.Notes, &c.Created, &c.PaymentTermsDays, &c.CreditLimit, &c.CreditCurrency, &c.IsOwner)
 }
 func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.QueryContext(r.Context(), customerColumns+`ORDER BY lower(name),id`)
