@@ -455,3 +455,52 @@ test('carry-forward allocation is unavailable until reconciliation', async t => 
 
   assert.deepEqual(errors,[]);
 });
+
+test('owner checkout sends cost price and no initial payment method', async t => {
+  const owner = {
+    id: 99, name: 'Owner', isOwner: true,
+    balances: [{currency:'LKR', outstanding:0}]
+  };
+  const ownerSale = {
+    ...sale,
+    payment:'credit',
+    customerId:99,
+    customerName:'Owner',
+    total:7550,
+    paidAmount:0,
+    outstanding:7550,
+    cashReceived:null,
+    changeDue:null
+  };
+
+  const {page,errors,requests} = await setup(t,{
+    customers:[owner],
+    handle:async(route,pathname)=>{
+      if(pathname !== '/api/checkout') return false;
+      await route.fulfill({json:ownerSale});
+      return true;
+    }
+  });
+
+  await ready(page);
+  await page.locator('[data-product="1"]').click();
+  await page.locator('#checkout-customer').selectOption('99');
+
+  assert.equal(
+    await page.locator('#credit-initial-payment').inputValue(),
+    '0.00'
+  );
+
+  await page.locator('#checkout').click();
+  await page.locator('#receipt-dialog').waitFor({state:'visible'});
+
+  const request = requests.find(r=>r.path==='/api/checkout').body;
+
+  assert.equal(request.customerId,99);
+  assert.equal(request.payment,'credit');
+  assert.equal(request.expectedTotal,7550);
+  assert.equal(request.initialPayment,0);
+  assert.equal(request.initialPaymentMethod,'');
+  assert.equal(request.cashReceived,undefined);
+  assert.deepEqual(errors,[]);
+});

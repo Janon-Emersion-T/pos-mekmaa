@@ -75,7 +75,7 @@ $("#checkout").onclick = async () => {
         if (!selectedCustomer) throw Error("Select a customer for buy now, pay later");
         const initialPayment = ownerSelected() ? 0 : minorUnits($("#credit-initial-payment").value);
         if (expectedTotal <= 0 || initialPayment >= expectedTotal) throw Error("Amount paid now must be less than the total. Use cash or card for a fully paid sale");
-        credit = {dueDate:$("#credit-due-date").value, initialPayment, initialPaymentMethod:$("#credit-initial-method").value};
+        credit = {dueDate:$("#credit-due-date").value, initialPayment, initialPaymentMethod:ownerSelected() ? "" : $("#credit-initial-method").value};
       }
       const request = {requestId: crypto.randomUUID(), items, payment, expectedTotal, sessionId:session.id, ...(cashReceived == null ? {} : {cashReceived}), ...(selectedCustomer ? {customerId:selectedCustomer} : {}), ...credit};
       // Persist before sending so a lost response can be retried with the same key.
