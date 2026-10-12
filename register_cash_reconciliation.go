@@ -91,6 +91,13 @@ func reconciliationCurrentAvailableSQL(excludeAllocation bool) string {
 		FROM register_cash_reconciliations r
 		WHERE r.id=$1
 		  AND r.status='verified'
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM register_cash_reconciliations newer
+		      WHERE newer.user_id=r.user_id
+		        AND newer.currency=r.currency
+		        AND newer.session_id>r.session_id
+		  )
 	`
 }
 

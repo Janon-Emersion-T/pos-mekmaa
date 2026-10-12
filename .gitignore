@@ -4,3 +4,5 @@ fridge-pos
 fridge-pos.new
 fridge-pos.backup
 .env
+
+shop_controls.go.before_reconciliation.bak

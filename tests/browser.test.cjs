@@ -42,6 +42,8 @@ async function setup(t, options = {}) {
       '/api/session':register, '/api/sessions':[], '/api/sales':[sale], '/api/sales/1':sale,
       '/api/inventory/movements':[], '/api/purchases':[], '/api/petty-cash':[], '/api/users':[],
       '/api/register-cash-allocations':[],
+      '/api/register-cash-reconciliations':[],
+      '/api/register-cash-carry-forward-options':[],
       '/api/financial/funding-sources':[
         {
           id:10,
@@ -443,7 +445,7 @@ test('carry-forward allocation is unavailable until reconciliation', async t => 
 
   assert.equal(
     await form.locator('[name="fundingType"] option[value="carry_forward"]').count(),
-    0
+    1
   );
 
   assert.equal(

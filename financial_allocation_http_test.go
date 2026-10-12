@@ -139,8 +139,8 @@ func TestRegisterCashAllocationHTTPAuthorizationPostgres(t *testing.T) {
 		before := countAllocations()
 		w := send(admin, carryForward)
 
-		if w.Code != http.StatusConflict {
-			t.Fatalf("got %d want 409: %s", w.Code, w.Body.String())
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("got %d want 400: %s", w.Code, w.Body.String())
 		}
 		if countAllocations() != before {
 			t.Fatal("rejected carry-forward created an allocation")

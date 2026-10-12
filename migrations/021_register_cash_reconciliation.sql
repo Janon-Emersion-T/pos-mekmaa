@@ -1,5 +1,5 @@
 -- Verified register cash reconciliation.
--- Carry-forward remains disabled at the API until verification is implemented.
+-- Carry-forward requires a verified reconciliation and remains subject to available cash.
 
 CREATE TABLE register_cash_reconciliations (
     id BIGSERIAL PRIMARY KEY,

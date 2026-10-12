@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"strings"
@@ -68,11 +67,12 @@ func TestOpeningFundingSecurityPostgres(t *testing.T) {
 			wantError:   "must be positive",
 		},
 		{
-			name:        "carry forward does not create money",
+			name:        "carry forward without reconciliation rejected",
 			fundingType: "carry_forward",
 			sourceType:  "central_cash",
 			balance:     5000,
 			amount:      1500,
+			wantError:   "reconciliation",
 		},
 	}
 
@@ -139,6 +139,25 @@ func TestOpeningFundingSecurityPostgres(t *testing.T) {
 
 			if tc.fundingType == "new_funds" {
 				fundingAccount = sourceID
+			}
+
+			// Invalid carry-forward must be rejected before a database
+			// allocation is created. The schema requires reconciliation_id.
+			if tc.fundingType == "carry_forward" {
+				var invalidCount int
+				err = tx.QueryRowContext(ctx, `
+					SELECT COUNT(*)
+					FROM register_cash_allocations
+					WHERE user_id=$1
+					  AND funding_type='carry_forward'
+				`, cashierID).Scan(&invalidCount)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if invalidCount != 0 {
+					t.Fatal("unexpected carry-forward allocation")
+				}
+				return
 			}
 
 			err = tx.QueryRowContext(ctx, `

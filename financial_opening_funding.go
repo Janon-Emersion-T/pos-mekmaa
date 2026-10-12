@@ -105,6 +105,25 @@ func postRegisterOpeningFunding(
 			recCurrency != currency {
 			return errors.New("carry-forward reconciliation is no longer eligible")
 		}
+
+		var newerReconciliationExists bool
+		err = tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1
+				FROM register_cash_reconciliations newer
+				JOIN register_cash_reconciliations source
+				  ON source.id=$1
+				WHERE newer.user_id=source.user_id
+				  AND newer.currency=source.currency
+				  AND newer.session_id>source.session_id
+			)
+		`, reconciliationID.Int64).Scan(&newerReconciliationExists)
+		if err != nil {
+			return err
+		}
+		if newerReconciliationExists {
+			return errors.New("carry-forward reconciliation is superseded")
+		}
 		available, err := currentCarryForwardAvailable(
 			ctx, tx, reconciliationID.Int64, &allocationID,
 		)
