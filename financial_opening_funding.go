@@ -22,20 +22,20 @@ func postRegisterOpeningFunding(
 
 	var ownerID, assignedBy, amount int64
 	var currency, fundingType, status string
-	var fundingAccountID sql.NullInt64
+	var fundingAccountID, reconciliationID sql.NullInt64
 	var postedAt sql.NullTime
 
 	err := tx.QueryRowContext(ctx, `
 		SELECT user_id,assigned_by,amount,currency,
 		       funding_type,funding_account_id,
-		       funding_posted_at,status
+		       funding_posted_at,status,reconciliation_id
 		FROM register_cash_allocations
 		WHERE id=$1
 		FOR UPDATE
 	`, allocationID).Scan(
 		&ownerID, &assignedBy, &amount, &currency,
 		&fundingType, &fundingAccountID,
-		&postedAt, &status,
+		&postedAt, &status, &reconciliationID,
 	)
 	if err != nil {
 		return err
@@ -74,11 +74,52 @@ func postRegisterOpeningFunding(
 	}
 
 	switch fundingType {
-	case "legacy_unclassified", "carry_forward":
+	case "legacy_unclassified":
 		if fundingAccountID.Valid {
 			return errors.New("non-funded allocation cannot specify a funding account")
 		}
 		return nil
+
+	case "carry_forward":
+		if fundingAccountID.Valid || !reconciliationID.Valid {
+			return errors.New("carry-forward allocation requires a reconciliation only")
+		}
+
+		var recUserID int64
+		var recCurrency, recStatus, sourceSessionStatus string
+		err = tx.QueryRowContext(ctx, `
+			SELECT r.user_id,r.currency,r.status,s.status
+			FROM register_cash_reconciliations r
+			JOIN register_sessions s ON s.id=r.session_id
+			WHERE r.id=$1
+			FOR UPDATE OF r
+		`, reconciliationID.Int64).Scan(
+			&recUserID, &recCurrency, &recStatus, &sourceSessionStatus,
+		)
+		if err != nil {
+			return err
+		}
+		if recStatus != "verified" ||
+			sourceSessionStatus != "closed" ||
+			recUserID != cashierID ||
+			recCurrency != currency {
+			return errors.New("carry-forward reconciliation is no longer eligible")
+		}
+		available, err := currentCarryForwardAvailable(
+			ctx, tx, reconciliationID.Int64, &allocationID,
+		)
+		if err != nil {
+			return err
+		}
+		if available < amount {
+			return errors.New("carry-forward cash is no longer available")
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE register_cash_allocations
+			SET funding_posted_at=now()
+			WHERE id=$1
+		`, allocationID)
+		return err
 
 	case "new_funds":
 		var assignerRole string
@@ -131,7 +172,7 @@ func postRegisterOpeningFunding(
 		}
 
 		if amount == 0 {
-			return nil
+			return errors.New("new opening funding amount must be positive")
 		}
 
 		account, err := getOrCreateFinancialAccount(
@@ -146,7 +187,7 @@ func postRegisterOpeningFunding(
 			fundingAccountID.Int64,
 			account.ID,
 			amount,
-			actorID,
+			assignedBy,
 			"register_cash_allocation",
 			allocationID,
 		); err != nil {

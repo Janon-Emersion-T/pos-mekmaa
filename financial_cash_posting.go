@@ -9,12 +9,13 @@ import (
 )
 
 var financialCashEntryTypes = map[string]bool{
-	"cash_sale":          true,
-	"cash_collection":    true,
-	"petty_cash_in":      true,
-	"petty_cash_out":     true,
-	"cash_refund":        true,
-	"opening_allocation": true,
+	"cash_sale":                true,
+	"cash_collection":          true,
+	"cash_collection_reversal": true,
+	"petty_cash_in":            true,
+	"petty_cash_out":           true,
+	"cash_refund":              true,
+	"opening_allocation":       true,
 }
 
 func postFinancialCashMovement(

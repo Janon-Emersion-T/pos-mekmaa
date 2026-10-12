@@ -144,6 +144,37 @@ func (s *Server) refundSale(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Only physical cash returned to the customer affects
+	// the cashier's persistent cash account.
+	cashMovement := int64(0)
+	if payment == "cash" {
+		cashMovement = int64(total)
+	} else if payment == "credit" {
+		cashMovement = int64(cashReturned)
+	}
+
+	if cashMovement > 0 {
+		cashierID := principal(r).ID
+
+		account, accountErr := getOrCreateFinancialAccount(
+			r.Context(), tx, "staff_cash", &cashierID, currency,
+		)
+		if accountErr != nil {
+			problem(w, 500, "Could not load refund cashier account")
+			return
+		}
+
+		if err = postFinancialCashMovement(
+			r.Context(), tx,
+			account.ID, -cashMovement,
+			"cash_refund", "refund", id,
+			cashierID, req.Reason,
+		); err != nil {
+			problem(w, 500, "Could not post cash refund")
+			return
+		}
+	}
+
 	result := map[string]any{"id": id, "saleId": saleID, "total": total, "currency": currency, "payment": payment, "debtReduction": debtReduction, "cashReturned": cashReturned, "cardReturned": cardReturned}
 	if saveRequest(r.Context(), tx, req.RequestID, "refund:"+fmtID(saleID), hash, principal(r).ID, result) != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not complete refund")

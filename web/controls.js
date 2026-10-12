@@ -30,14 +30,37 @@ function adminSessionControls() {
   if (currentUser?.role !== "superadmin") return "";
   const staff = users.filter(u => u.active && u.id !== currentUser.id);
   const openSessions = sessionHistory.filter(x => x.status === "open");
+  const carryForwardRows = carryForwardOptions.filter(r => r.currency === settings.currency && r.currentAvailableCash > 0);
+  const reconciliationRows = registerReconciliations.slice(0, 25);
   return `<h2 class="mb-3 mt-7 font-semibold">Assign opening cash</h2>
     <form data-form="cash-allocation" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-4">
       <label class="text-xs">Staff member<select name="userId" required class="mt-2 h-11 w-full rounded-lg border px-3">${staff.map(u=>`<option value="${u.id}">${escapeHTML(u.email)} · ${escapeHTML(u.role)}</option>`).join("")}</select></label>
       ${amountField("Opening cash", "amount", "0.00")}
+      <label class="text-xs">Funding type
+        <select name="fundingType" required class="mt-2 h-11 w-full rounded-lg border px-3">
+          <option value="new_funds">New funds — transfer from source</option>
+          <option value="carry_forward">Carry-forward — verified cash</option>
+        </select>
+      </label>
+      <label class="text-xs sm:col-span-2">Funding source
+        <select name="fundingAccountId" class="mt-2 h-11 w-full rounded-lg border px-3">
+          <option value="">Select a funding account</option>
+          ${fundingSources.filter(a=>a.currency===settings.currency).map(a=>`<option value="${a.id}">${a.accountType==="central_cash"?"Central cash":"Superadmin cash"} · ${money(a.balance,a.currency)}</option>`).join("")}
+        </select>
+      </label>
+      <label class="text-xs sm:col-span-2">Verified carry-forward
+        <select name="reconciliationId" class="mt-2 h-11 w-full rounded-lg border px-3">
+          <option value="">Select verified cash</option>
+          ${carryForwardRows.map(r=>`<option value="${r.id}" data-user-id="${r.userId}" data-available="${r.currentAvailableCash}">${escapeHTML(r.userEmail)} · session #${r.sessionId} · ${money(r.currentAvailableCash,r.currency)}</option>`).join("")}
+        </select>
+      </label>
       ${field("Note", "note", "text", "Session start cash")}
+      <p class="text-xs text-gray-500 sm:col-span-4">New funds transfer from the selected source when the register opens. Carry-forward uses verified physical cash from a closed register and creates no new ledger credit.</p>
       <button class="mt-6 h-11 rounded-lg bg-ink text-sm text-white">Assign cash</button>
     </form>
-    ${table(["Staff","Amount","Assigned by","Note","Assigned"],openingAllocations.map(a=>`<tr class="border-b"><td class="p-4">${escapeHTML(a.userEmail)}</td><td class="p-4 font-semibold">${money(a.amount,a.currency)}</td><td class="p-4">${escapeHTML(a.assignedByEmail)}</td><td class="p-4">${escapeHTML(a.note)}</td><td class="p-4">${new Date(a.createdAt).toLocaleString()}</td></tr>`).join(""))}
+    ${table(["Staff","Amount","Source","Assigned by","Assigned"],openingAllocations.map(a=>`<tr class="border-b"><td class="p-4">${escapeHTML(a.userEmail)}</td><td class="p-4 font-semibold">${money(a.amount,a.currency)}</td><td class="p-4">${escapeHTML((a.fundingType||"legacy_unclassified").replaceAll("_"," "))}${a.reconciliationId?` · reconciliation #${a.reconciliationId}`:""}</td><td class="p-4">${escapeHTML(a.assignedByEmail)}</td><td class="p-4">${new Date(a.createdAt).toLocaleString()}</td></tr>`).join(""))}
+    <h2 class="mb-3 mt-7 font-semibold">Register reconciliations</h2>
+    ${table(["Session","Staff","Count","Difference","Available","Status","Review"],reconciliationRows.map(r=>`<tr class="border-b"><td class="p-4">#${r.sessionId}</td><td class="p-4">${escapeHTML(r.userEmail)}</td><td class="p-4">${money(r.countedCash,r.currency)} of ${money(r.expectedCash,r.currency)}</td><td class="p-4 ${r.cashDifference<0?"text-red-600":"text-green-600"}">${money(r.cashDifference,r.currency)}</td><td class="p-4">${r.status==="verified"?money(r.currentAvailableCash,r.currency):"—"}</td><td class="p-4 capitalize">${escapeHTML(r.status)}</td><td class="p-4">${r.status==="pending"?`<form data-form="reconciliation-review" data-reconciliation-id="${r.id}" class="grid gap-2"><input name="remarks" maxlength="500" placeholder="Remarks" class="h-10 rounded-lg border px-3 text-xs"><div class="flex gap-2"><button name="action" value="verify" class="rounded-lg bg-ink px-3 py-2 text-xs text-white">Verify</button><button name="action" value="reject" class="rounded-lg border px-3 py-2 text-xs text-red-600">Reject</button></div></form>`:escapeHTML(r.remarks||"")}</td></tr>`).join(""))}
     <h2 class="mb-3 mt-7 font-semibold">Open staff sessions</h2>
     ${table(["Session","Staff","Current cash","Admin close"],openSessions.map(x=>`<tr class="border-b"><td class="p-4">#${x.id}</td><td class="p-4">${escapeHTML(x.openedByEmail)}</td><td class="p-4 font-semibold">${money(x.expectedCash,x.currency)}</td><td class="p-4"><form data-form="admin-close" data-session-id="${x.id}" data-expected="${x.expectedCash}" class="grid gap-2 sm:grid-cols-3">${amountField("Counted cash","closingCash",(x.expectedCash/100).toFixed(2))}<input name="reason" required maxlength="500" placeholder="Reason" class="mt-5 h-11 rounded-lg border px-3 text-xs sm:col-span-2"><button class="rounded-lg bg-ink px-4 py-2 text-xs text-white sm:col-span-3">Close session</button></form></td></tr>`).join(""))}`;
 }
@@ -91,7 +114,7 @@ function renderPosInsights() {
 
 $("#other-page").addEventListener("submit", async e => {
   const form = e.target, kind = form.dataset.form;
-  if (!["inventory-filter","cash-allocation","database-reset","credit-policy","opening-correction","payment-reversal","admin-close"].includes(kind)) return;
+  if (!["inventory-filter","cash-allocation","database-reset","credit-policy","opening-correction","payment-reversal","admin-close","reconciliation-review"].includes(kind)) return;
   e.preventDefault();
   if (form.dataset.saving) return;
   const data = Object.fromEntries(new FormData(form));
@@ -103,7 +126,33 @@ $("#other-page").addEventListener("submit", async e => {
       const params = new URLSearchParams(Object.entries(data).filter(([,value])=>value !== ""));
       await navigate("inventory", true, params.size ? "?"+params.toString() : "");
     } else if (kind === "cash-allocation") {
-      await api("/api/register-cash-allocations", jsonRequest({userId:Number(data.userId),amount:minorUnits(data.amount),note:data.note}));
+      const fundingType = data.fundingType;
+      const fundingAccountId = fundingType === "new_funds"
+        ? Number(data.fundingAccountId)
+        : null;
+      const reconciliationId = fundingType === "carry_forward"
+        ? Number(data.reconciliationId)
+        : null;
+      const amount = minorUnits(data.amount);
+      if (fundingType === "new_funds") {
+        const selected = fundingSources.find(a => a.id === fundingAccountId);
+        if (!selected || amount <= 0 || amount > selected.balance) {
+          throw new Error("Select a funding account with sufficient available balance.");
+        }
+      } else {
+        const selected = carryForwardOptions.find(r => r.id === reconciliationId);
+        if (!selected || Number(data.userId) !== selected.userId || amount <= 0 || amount > selected.currentAvailableCash) {
+          throw new Error("Select verified carry-forward cash for this staff member.");
+        }
+      }
+      await api("/api/register-cash-allocations", jsonRequest({
+        userId:Number(data.userId),
+        amount,
+        note:data.note,
+        fundingType,
+        fundingAccountId,
+        reconciliationId
+      }));
       await loadPage(); toast("Opening cash assigned");
     } else if (kind === "database-reset") {
       await api("/api/system/reset", jsonRequest({password:data.password,confirmation:data.confirmation}));
@@ -122,6 +171,10 @@ $("#other-page").addEventListener("submit", async e => {
     } else if (kind === "admin-close") {
       const result = await api(`/api/sessions/${form.dataset.sessionId}/close`, jsonRequest({closingCash:minorUnits(data.closingCash),expectedCash:Number(form.dataset.expected),reason:data.reason}));
       await loadPage(); toast(`Session closed · difference ${money(result.difference)}`);
+    } else if (kind === "reconciliation-review") {
+      const action = e.submitter?.value || data.action;
+      const result = await api(`/api/register-cash-reconciliations/${form.dataset.reconciliationId}/review`, jsonRequest({action,remarks:data.remarks || ""}));
+      await loadPage(); toast(action === "verify" ? `Reconciliation verified · available ${money(result.verifiedAvailableCash)}` : "Reconciliation rejected");
     }
   } catch (error) { toast(error.message); }
   finally { delete form.dataset.saving; if (submit) submit.disabled = false; }

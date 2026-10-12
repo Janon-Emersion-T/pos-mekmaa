@@ -17,7 +17,8 @@ func TestRegisterOpeningFundingPostgres(t *testing.T) {
 
 	ctx := context.Background()
 
-	db, err := sql.Open("pgx", url)
+	setTestBootstrapAdmin(t)
+	db, err := openDB(ctx, url)
 	if err != nil {
 		t.Fatal(err)
 	}

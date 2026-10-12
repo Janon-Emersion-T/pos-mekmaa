@@ -118,6 +118,36 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	if scalar(`SELECT count(*) FROM customer_payments WHERE sale_id=$1`, saleID) != 1 || scalar(`SELECT stock FROM products WHERE id=$1`, productID) != 98 {
 		t.Fatal("checkout replay changed payments or stock")
 	}
+
+	// Initial cash payment must be posted once to the cashier's
+	// persistent financial account, referencing the payment record.
+	var initialPaymentID int64
+	if err = db.QueryRow(`
+		SELECT id
+		FROM customer_payments
+		WHERE sale_id=$1 AND payment='cash'
+	`, saleID).Scan(&initialPaymentID); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := scalar(`
+		SELECT COUNT(*)
+		FROM financial_ledger_entries
+		WHERE entry_type='cash_collection'
+		  AND reference_type='customer_payment'
+		  AND reference_id=$1
+		  AND amount=2000
+	`, initialPaymentID); got != 1 {
+		t.Fatalf("initial cash payment ledger entries=%d want=1", got)
+	}
+
+	if got := scalar(`
+		SELECT COALESCE(SUM(balance),0)
+		FROM financial_accounts
+		WHERE account_type='staff_cash' AND user_id=$1
+	`, userID); got != 2000 {
+		t.Fatalf("cashier financial balance after deposit=%d want=2000", got)
+	}
 	balance := func(want int) {
 		t.Helper()
 		if got := scalar(`SELECT outstanding FROM credit_sale_balances WHERE id=$1`, saleID); got != want {
@@ -181,6 +211,31 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	}
 	balance(1000)
 	cash(9000)
+
+	// Initial deposit 2000 + cash collections 3000 + 3000.
+	// The 1000 card collection must not enter physical cash.
+	if got := scalar(`
+		SELECT COALESCE(SUM(balance),0)
+		FROM financial_accounts
+		WHERE account_type='staff_cash'
+		  AND user_id=$1
+	`, userID); got != 8000 {
+		t.Fatalf("cashier financial balance=%d want=8000", got)
+	}
+
+	if got := scalar(`
+		SELECT COUNT(*)
+		FROM financial_ledger_entries
+		WHERE entry_type='cash_collection'
+		  AND reference_type='customer_payment'
+		  AND account_id IN (
+		      SELECT id FROM financial_accounts
+		      WHERE account_type='staff_cash' AND user_id=$1
+		  )
+	`, userID); got != 3 {
+		t.Fatalf("cash collection ledger entries=%d want=3", got)
+	}
+
 	var list []Customer
 	if err = json.Unmarshal(request("GET", "/api/customers", "", 200).Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
@@ -211,12 +266,56 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	request("POST", refundPath, refund("credit-return-first-item", 1000), 200)
 	balance(0)
 	cash(5000)
+
+	// First refund: 1000 debt cancelled and 4000 physical cash returned.
+	// The replay must not deduct cash a second time.
+	if got := scalar(`
+		SELECT COALESCE(SUM(balance),0)
+		FROM financial_accounts
+		WHERE account_type='staff_cash' AND user_id=$1
+	`, userID); got != 4000 {
+		t.Fatalf("financial balance after first refund=%d want=4000", got)
+	}
+	if got := scalar(`
+		SELECT COUNT(*)
+		FROM financial_ledger_entries
+		WHERE entry_type='cash_refund'
+		  AND reference_type='refund'
+		  AND amount=-4000
+	`); got != 1 {
+		t.Fatalf("first refund financial postings=%d want=1", got)
+	}
 	if scalar(`SELECT cash_returned FROM refunds WHERE sale_id=$1`, saleID) != 4000 {
 		t.Fatal("credit refund must cancel debt before returning money")
 	}
 	request("POST", refundPath, refund("credit-return-second-item", 0), 201)
 	cash(0)
 	balance(0)
+
+	// Second refund returns 5000 cash, leaving persistent cash at -1000.
+	if got := scalar(`
+		SELECT COALESCE(SUM(balance),0)
+		FROM financial_accounts
+		WHERE account_type='staff_cash' AND user_id=$1
+	`, userID); got != -1000 {
+		t.Fatalf("financial balance after both refunds=%d want=-1000", got)
+	}
+	if got := scalar(`
+		SELECT COUNT(*)
+		FROM financial_ledger_entries
+		WHERE entry_type='cash_refund'
+		  AND reference_type='refund'
+	`); got != 2 {
+		t.Fatalf("cash refund ledger entries=%d want=2", got)
+	}
+	if got := scalar(`
+		SELECT COALESCE(SUM(amount),0)
+		FROM financial_ledger_entries
+		WHERE entry_type='cash_refund'
+		  AND reference_type='refund'
+	`); got != -9000 {
+		t.Fatalf("cash refund ledger total=%d want=-9000", got)
+	}
 	if scalar(`SELECT stock FROM products WHERE id=$1`, productID) != 100 {
 		t.Fatal("returned stock mismatch")
 	}
@@ -328,6 +427,34 @@ func TestCustomersAndCreditSales(t *testing.T) {
 		}
 		request("POST", openingPaymentPath, openingPayment("historical-final-payment", 1500, "card"), 201)
 		cash(8500)
+
+		// Opening-balance collections: 2500 + 6000 cash.
+		// The final 1500 card payment must not post to cash.
+		if got := scalar(`
+			SELECT COUNT(*)
+			FROM financial_ledger_entries l
+			JOIN customer_payments p
+			  ON l.reference_type='customer_payment'
+			 AND l.reference_id=p.id
+			WHERE p.opening_balance_id=$1
+			  AND l.entry_type='cash_collection'
+			  AND p.payment='cash'
+		`, openingID); got != 2 {
+			t.Fatalf("opening-balance cash ledger entries=%d want=2", got)
+		}
+
+		if got := scalar(`
+			SELECT COALESCE(SUM(l.amount),0)
+			FROM financial_ledger_entries l
+			JOIN customer_payments p
+			  ON l.reference_type='customer_payment'
+			 AND l.reference_id=p.id
+			WHERE p.opening_balance_id=$1
+			  AND l.entry_type='cash_collection'
+		`, openingID); got != 8500 {
+			t.Fatalf("opening-balance cash ledger total=%d want=8500", got)
+		}
+
 		if err := json.Unmarshal(request("GET", openingPath, "", 200).Body.Bytes(), &detail); err != nil {
 			t.Fatal(err)
 		}

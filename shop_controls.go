@@ -142,9 +142,27 @@ func (s *Server) reverseCustomerPayment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer tx.Rollback()
-	var sid, cid, saleID, openingID int64
+	var sid, cid, saleID, openingID, originalCashierID int64
 	var amount int
-	err := tx.QueryRowContext(r.Context(), `SELECT p.session_id,COALESCE(s.customer_id,b.customer_id),COALESCE(p.sale_id,0),COALESCE(p.opening_balance_id,0),p.amount FROM customer_payments p LEFT JOIN sales s ON s.id=p.sale_id LEFT JOIN customer_opening_balances b ON b.id=p.opening_balance_id WHERE p.id=$1`, id).Scan(&sid, &cid, &saleID, &openingID, &amount)
+	var paymentMethod, paymentCurrency string
+	err := tx.QueryRowContext(r.Context(), `
+		SELECT p.session_id,
+		       COALESCE(s.customer_id,b.customer_id),
+		       COALESCE(p.sale_id,0),
+		       COALESCE(p.opening_balance_id,0),
+		       p.amount,
+		       p.payment,
+		       p.currency,
+		       rs.opened_by
+		FROM customer_payments p
+		JOIN register_sessions rs ON rs.id=p.session_id
+		LEFT JOIN sales s ON s.id=p.sale_id
+		LEFT JOIN customer_opening_balances b ON b.id=p.opening_balance_id
+		WHERE p.id=$1
+	`, id).Scan(
+		&sid, &cid, &saleID, &openingID, &amount,
+		&paymentMethod, &paymentCurrency, &originalCashierID,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		problem(w, 404, "Payment not found")
 		return
@@ -187,9 +205,70 @@ func (s *Server) reverseCustomerPayment(w http.ResponseWriter, r *http.Request) 
 		problem(w, 409, "This payment funded money already refunded. It cannot be reversed")
 		return
 	}
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO customer_payment_reversals(payment_id,reason,created_by,cashier_email) VALUES($1,$2,$3,$4)`, id, req.Reason, principal(r).ID, principal(r).Email); err != nil {
+	var reversalID int64
+	err = tx.QueryRowContext(
+		r.Context(),
+		`INSERT INTO customer_payment_reversals(payment_id,reason,created_by,cashier_email)
+		 VALUES($1,$2,$3,$4) RETURNING id`,
+		id, req.Reason, principal(r).ID, principal(r).Email,
+	).Scan(&reversalID)
+	if err != nil {
 		problem(w, 500, "Could not reverse payment")
 		return
+	}
+
+	if paymentMethod == "cash" {
+		var originalLedgerCount int
+		if err = tx.QueryRowContext(
+			r.Context(),
+			`SELECT COUNT(*)
+			 FROM financial_ledger_entries
+			 WHERE reference_type='customer_payment'
+			   AND reference_id=$1
+			   AND entry_type='cash_collection'`,
+			id,
+		).Scan(&originalLedgerCount); err != nil {
+			problem(w, 500, "Could not verify original cash posting")
+			return
+		}
+
+		// Historical payments without an original financial posting
+		// must not create an unmatched negative cash entry.
+		if originalLedgerCount == 0 {
+			finishOperation(w, r, tx, req.RequestID, kind, hash,
+				map[string]any{"id": id, "reversed": true})
+			return
+		}
+
+		var originalAccountID int64
+		var originalAmount int64
+		err = tx.QueryRowContext(r.Context(), `
+			SELECT l.account_id, l.amount
+			FROM financial_ledger_entries l
+			JOIN financial_accounts a ON a.id=l.account_id
+			WHERE l.reference_type='customer_payment'
+			  AND l.reference_id=$1
+			  AND l.entry_type='cash_collection'
+			  AND a.account_type='staff_cash'
+			  AND a.user_id=$2
+			  AND a.currency=$3
+		`, id, originalCashierID, paymentCurrency).
+			Scan(&originalAccountID, &originalAmount)
+		if err != nil || originalAmount != int64(amount) {
+			problem(w, 409, "Original cash posting does not match this payment")
+			return
+		}
+
+		if err = postFinancialCashMovement(
+			r.Context(), tx,
+			originalAccountID, -int64(amount),
+			"cash_collection_reversal",
+			"customer_payment_reversal", reversalID,
+			principal(r).ID, req.Reason,
+		); err != nil {
+			problem(w, 500, "Could not post payment reversal")
+			return
+		}
 	}
 	finishOperation(w, r, tx, req.RequestID, kind, hash, map[string]any{"id": id, "reversed": true})
 }
@@ -258,7 +337,37 @@ func finishSessionClose(w http.ResponseWriter, r *http.Request, tx *sql.Tx, x Se
 		}
 	}
 
-	_, err := tx.ExecContext(r.Context(), `UPDATE register_sessions SET status='closed',closed_at=now(),closing_cash=$1,closed_by=$2,closed_by_email=$3,closing_expected_cash=$4,closing_reason=$5 WHERE id=$6`, cash, principal(r).ID, principal(r).Email, x.ExpectedCash, reason, x.ID)
+	// Record the physical closing count for later superadmin verification.
+	// This does not change the persistent financial account balance.
+	_, err := tx.ExecContext(r.Context(), `
+		INSERT INTO register_cash_reconciliations(
+			session_id,user_id,currency,
+			expected_cash,counted_cash,
+			cash_difference,shortage_cash,
+			closed_ledger_entry_id,remarks
+		)
+		VALUES(
+			$1,$2,$3,$4,$5,
+			$5::bigint - $4::bigint,
+			GREATEST($4::bigint - $5::bigint, 0),
+			COALESCE((
+				SELECT MAX(l.id)
+				FROM financial_ledger_entries l
+				JOIN financial_accounts fa ON fa.id=l.account_id
+				WHERE fa.account_type='staff_cash'
+				  AND fa.user_id=$2
+				  AND fa.currency=$3
+			),0),
+			$6
+		)
+	`, x.ID, x.OpenedBy, x.Currency,
+		int64(x.ExpectedCash), int64(cash), reason)
+	if err != nil {
+		problem(w, 500, "Could not record register reconciliation")
+		return false
+	}
+
+	_, err = tx.ExecContext(r.Context(), `UPDATE register_sessions SET status='closed',closed_at=now(),closing_cash=$1,closed_by=$2,closed_by_email=$3,closing_expected_cash=$4,closing_reason=$5 WHERE id=$6`, cash, principal(r).ID, principal(r).Email, x.ExpectedCash, reason, x.ID)
 	if err != nil {
 		problem(w, 500, "Could not close session")
 		return false

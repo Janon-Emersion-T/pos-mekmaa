@@ -374,6 +374,27 @@ func (s *Server) collectCustomerPayment(w http.ResponseWriter, r *http.Request) 
 		problem(w, 500, "Could not save customer payment")
 		return
 	}
+	if req.Payment == "cash" {
+		account, accountErr := getOrCreateFinancialAccount(
+			r.Context(), tx, "staff_cash",
+			&session.OpenedBy, session.Currency,
+		)
+		if accountErr != nil {
+			problem(w, 500, "Could not load cashier cash account")
+			return
+		}
+
+		if err = postFinancialCashMovement(
+			r.Context(), tx,
+			account.ID, int64(req.Amount),
+			"cash_collection", "customer_payment", id,
+			principal(r).ID, "Customer cash collection",
+		); err != nil {
+			problem(w, 500, "Could not post customer cash collection")
+			return
+		}
+	}
+
 	result := map[string]any{"id": id, "saleId": req.SaleID, "openingBalanceId": req.OpeningBalanceID, "amount": req.Amount, "currency": currency, "outstanding": outstanding - req.Amount}
 	if saveRequest(r.Context(), tx, req.RequestID, kind, hash, principal(r).ID, result) != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not complete customer payment")

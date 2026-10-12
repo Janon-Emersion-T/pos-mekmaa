@@ -75,6 +75,9 @@ let products = [],
   petty = [],
   movements = [],
   openingAllocations = [],
+  fundingSources = [],
+  registerReconciliations = [],
+  carryForwardOptions = [],
   users = [],
   session = null,
   sessionHistory = [],
@@ -430,11 +433,20 @@ async function loadPage() {
     const customerId = new URLSearchParams(location.search).get("id");
     const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements"+location.search, purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
     const needUsers = requestedPage === "users" || (requestedPage === "session" && currentUser?.role === "superadmin");
-    const [savedSettings, savedProducts, savedSession, records, savedCategories, savedCustomers, savedAllocations, savedUsersForControls] = await Promise.all([
+    const [savedSettings, savedProducts, savedSession, records, savedCategories, savedCustomers, savedAllocations, savedUsersForControls, savedFundingSources, savedReconciliations, savedCarryForwardOptions] = await Promise.all([
       api("/api/settings"), api("/api/products"), api("/api/session"),
       endpoints[requestedPage] ? api(endpoints[requestedPage]) : Promise.resolve(null),
       api("/api/categories"), api("/api/customers"), api("/api/register-cash-allocations"),
       needUsers ? api("/api/users") : Promise.resolve(users),
+      requestedPage === "session" && currentUser?.role === "superadmin"
+        ? api("/api/financial/funding-sources")
+        : Promise.resolve([]),
+      requestedPage === "session" && currentUser?.role === "superadmin"
+        ? api("/api/register-cash-reconciliations")
+        : Promise.resolve([]),
+      requestedPage === "session" && currentUser?.role === "superadmin"
+        ? api("/api/register-cash-carry-forward-options")
+        : Promise.resolve([]),
     ]);
     if (request !== pageRequest) return;
     applySettings(savedSettings);
@@ -442,6 +454,9 @@ async function loadPage() {
     productCategories = savedCategories;
     customers = savedCustomers;
     openingAllocations = savedAllocations;
+    fundingSources = savedFundingSources;
+    registerReconciliations = savedReconciliations;
+    carryForwardOptions = savedCarryForwardOptions;
     users = savedUsersForControls;
     if (requestedPage === "customers") customerAccount = records;
     session = savedSession;
@@ -677,7 +692,7 @@ $("#other-page").addEventListener("submit", async (e) => {
   const f = e.target,
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
-  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","database-reset"].includes(kind)) return;
+  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","database-reset","reconciliation-review"].includes(kind)) return;
   if (f.dataset.saving) return;
   f.dataset.saving = "true";
   const submit = f.querySelector('button:not([type="button"])');

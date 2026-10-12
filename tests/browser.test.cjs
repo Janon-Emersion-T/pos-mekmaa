@@ -42,6 +42,22 @@ async function setup(t, options = {}) {
       '/api/session':register, '/api/sessions':[], '/api/sales':[sale], '/api/sales/1':sale,
       '/api/inventory/movements':[], '/api/purchases':[], '/api/petty-cash':[], '/api/users':[],
       '/api/register-cash-allocations':[],
+      '/api/financial/funding-sources':[
+        {
+          id:10,
+          userId:null,
+          accountType:'central_cash',
+          currency:'LKR',
+          balance:500000
+        },
+        {
+          id:11,
+          userId:1,
+          accountType:'superadmin_cash',
+          currency:'LKR',
+          balance:250000
+        }
+      ],
       '/api/reports/daily':{date:'2026-09-25',timezone:'Asia/Colombo',rows:[]}, '/api/audit':[],
       '/api/checkout':sale, '/api/auth/password':{ok:true},
     };
@@ -316,5 +332,124 @@ test('checkout stays disabled until the current user opens their own session',as
   await page.locator('#checkout').click();
   await page.locator('#receipt-dialog').waitFor({state:'visible'});
   assert.equal(requests.find(r=>r.path==='/api/checkout').body.sessionId,43);
+  assert.deepEqual(errors,[]);
+});
+
+test('superadmin assigns opening cash from an authorized source', async t => {
+  const {page,errors,requests} = await setup(t,{
+    handle:async(route,pathname) => {
+      if(pathname === '/api/users') {
+        await route.fulfill({json:[
+          {id:2,email:'cashier@example.test',role:'cashier',active:true}
+        ]});
+        return true;
+      }
+      if(pathname === '/api/register-cash-allocations' &&
+         route.request().method() === 'POST') {
+        await route.fulfill({status:201,json:{id:50}});
+        return true;
+      }
+      return false;
+    }
+  });
+
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const form = page.locator('[data-form="cash-allocation"]');
+  await form.waitFor();
+
+  await form.locator('[name="userId"]').selectOption('2');
+  await form.locator('[name="amount"]').fill('1000.00');
+  await form.locator('[name="fundingType"]').selectOption('new_funds');
+  await form.locator('[name="fundingAccountId"]').selectOption('10');
+
+  await form.locator('button').click();
+
+  await page.waitForFunction(() =>
+    document.querySelector('#toast')?.textContent.includes('Opening cash assigned')
+  );
+
+  const request = requests.find(r =>
+    r.path === '/api/register-cash-allocations' &&
+    r.method === 'POST'
+  );
+
+  assert.ok(request);
+  assert.equal(request.body.userId,2);
+  assert.equal(request.body.amount,100000);
+  assert.equal(request.body.fundingType,'new_funds');
+  assert.equal(request.body.fundingAccountId,10);
+  assert.deepEqual(errors,[]);
+});
+
+test('opening cash allocation rejects insufficient source balance', async t => {
+  const {page,errors,requests} = await setup(t,{
+    handle:async(route,pathname) => {
+      if(pathname === '/api/users') {
+        await route.fulfill({json:[
+          {id:2,email:'cashier@example.test',role:'cashier',active:true}
+        ]});
+        return true;
+      }
+      return false;
+    }
+  });
+
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const form = page.locator('[data-form="cash-allocation"]');
+  await form.waitFor();
+
+  await form.locator('[name="amount"]').fill('6000.00');
+  await form.locator('[name="fundingType"]').selectOption('new_funds');
+  await form.locator('[name="fundingAccountId"]').selectOption('10');
+  await form.locator('button').click();
+
+  await page.waitForFunction(() =>
+    document.querySelector('#toast')?.textContent.includes('sufficient available balance')
+  );
+
+  assert.equal(
+    requests.filter(r =>
+      r.path === '/api/register-cash-allocations' &&
+      r.method === 'POST'
+    ).length,
+    0
+  );
+
+  assert.deepEqual(errors,[]);
+});
+
+test('carry-forward allocation is unavailable until reconciliation', async t => {
+  const {page,errors} = await setup(t,{
+    handle:async(route,pathname) => {
+      if(pathname === '/api/users') {
+        await route.fulfill({json:[
+          {id:2,email:'cashier@example.test',role:'cashier',active:true}
+        ]});
+        return true;
+      }
+      return false;
+    }
+  });
+
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const form = page.locator('[data-form="cash-allocation"]');
+  await form.waitFor();
+
+  assert.equal(
+    await form.locator('[name="fundingType"] option[value="carry_forward"]').count(),
+    0
+  );
+
+  assert.equal(
+    await form.locator('[name="fundingType"]').inputValue(),
+    'new_funds'
+  );
+
   assert.deepEqual(errors,[]);
 });

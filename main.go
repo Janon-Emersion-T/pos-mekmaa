@@ -528,6 +528,27 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		}
 		names = append(names, fmt.Sprintf("%d × %s", x.Quantity, x.Name))
 	}
+	if req.Payment == "cash" && total > 0 {
+		account, accountErr := getOrCreateFinancialAccount(
+			r.Context(), tx, "staff_cash",
+			&session.OpenedBy, session.Currency,
+		)
+		if accountErr != nil {
+			problem(w, 500, "Could not load cashier cash account")
+			return
+		}
+
+		if err = postFinancialCashMovement(
+			r.Context(), tx,
+			account.ID, int64(total),
+			"cash_sale", "sale", id,
+			principal(r).ID, "Cash sale at checkout",
+		); err != nil {
+			problem(w, 500, "Could not post cash sale to financial ledger")
+			return
+		}
+	}
+
 	result := Sale{ID: id, Created: created, Total: total, Payment: req.Payment, Items: strings.Join(names, ", "), SessionID: session.ID, CreatedBy: principal(r).ID, CashierEmail: principal(r).Email, Currency: session.Currency, CashReceived: req.CashReceived, ChangeDue: change}
 	result.DueDate = dueDate
 	result.CustomerID, result.CustomerName, result.PaidAmount = req.CustomerID, customerName, total
@@ -538,10 +559,39 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 			if method == "" {
 				method = "cash"
 			}
-			_, err = tx.ExecContext(r.Context(), `INSERT INTO customer_payments(sale_id,session_id,amount,payment,currency,note,created_by,cashier_email) VALUES($1,$2,$3,$4,$5,'Payment at checkout',$6,$7)`, id, session.ID, req.InitialPayment, method, session.Currency, principal(r).ID, principal(r).Email)
+			var paymentID int64
+			err = tx.QueryRowContext(
+				r.Context(),
+				`INSERT INTO customer_payments(sale_id,session_id,amount,payment,currency,note,created_by,cashier_email)
+				 VALUES($1,$2,$3,$4,$5,'Payment at checkout',$6,$7)
+				 RETURNING id`,
+				id, session.ID, req.InitialPayment, method,
+				session.Currency, principal(r).ID, principal(r).Email,
+			).Scan(&paymentID)
 			if err != nil {
 				problem(w, 500, "Could not record initial payment")
 				return
+			}
+
+			if method == "cash" {
+				account, accountErr := getOrCreateFinancialAccount(
+					r.Context(), tx, "staff_cash",
+					&session.OpenedBy, session.Currency,
+				)
+				if accountErr != nil {
+					problem(w, 500, "Could not load cashier cash account")
+					return
+				}
+
+				if err = postFinancialCashMovement(
+					r.Context(), tx,
+					account.ID, int64(req.InitialPayment),
+					"cash_collection", "customer_payment", paymentID,
+					principal(r).ID, "Initial cash payment at checkout",
+				); err != nil {
+					problem(w, 500, "Could not post initial cash payment")
+					return
+				}
 			}
 		}
 	}
@@ -633,7 +683,27 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if allocationID != nil {
-			if _, err = tx.ExecContext(r.Context(), `UPDATE register_cash_allocations SET status='used',used_session_id=$1,used_at=now() WHERE id=$2`, id, *allocationID); err != nil {
+			if err = postRegisterOpeningFunding(
+				r.Context(),
+				tx,
+				*allocationID,
+				id,
+				principal(r).ID,
+				principal(r).ID,
+			); err != nil {
+				problem(w, 409, "Opening cash funding failed. Contact the superadmin.")
+				return
+			}
+
+			if _, err = tx.ExecContext(
+				r.Context(),
+				`UPDATE register_cash_allocations
+				 SET status='used',
+				     used_session_id=$1,
+				     used_at=now()
+				 WHERE id=$2 AND status='pending'`,
+				id, *allocationID,
+			); err != nil {
 				problem(w, 500, "Could not use assigned opening cash")
 				return
 			}
@@ -722,6 +792,39 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not save entry")
 		return
 	}
+
+	// Post the physical cash movement in the same transaction.
+	// Register session cash and persistent staff cash remain separate views.
+	cashierID := x.OpenedBy
+	if cashierID <= 0 {
+		problem(w, 500, "Register session has no cashier owner")
+		return
+	}
+
+	account, err := getOrCreateFinancialAccount(
+		r.Context(), tx, "staff_cash", &cashierID, x.Currency,
+	)
+	if err != nil {
+		problem(w, 500, "Could not load cashier financial account")
+		return
+	}
+
+	movement := int64(req.Amount)
+	entryType := "petty_cash_in"
+	if req.Direction == "out" {
+		movement = -movement
+		entryType = "petty_cash_out"
+	}
+
+	if err := postFinancialCashMovement(
+		r.Context(), tx, account.ID, movement,
+		entryType, "petty_cash_entry", id,
+		principal(r).ID, req.Category+": "+req.Note,
+	); err != nil {
+		problem(w, 500, "Could not post petty cash movement")
+		return
+	}
+
 	finishOperation(w, r, tx, req.RequestID, "petty", hash, map[string]any{"id": id})
 }
 func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
