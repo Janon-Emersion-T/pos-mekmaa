@@ -176,12 +176,15 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			closeResult = call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d,"expectedCash":1450}`, id))
+			closeResult = call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1000,"sessionId":%d,"expectedCash":1000}`, id))
 		}()
 		close(start)
 		wg.Wait()
-		if closeResult.Code != 200 || (saleResult.Code != 201 && saleResult.Code != 409) {
+		if !((closeResult.Code == 200 && saleResult.Code == 409) || (closeResult.Code == 409 && saleResult.Code == 201)) {
 			t.Fatalf("race: close=%d sale=%d", closeResult.Code, saleResult.Code)
+		}
+		if closeResult.Code == 409 {
+			assertStatus(call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d,"expectedCash":1450}`, id)), 200)
 		}
 		var expected, total int
 		if err = db.QueryRow(`SELECT closing_expected_cash,COALESCE((SELECT SUM(total) FROM sales WHERE session_id=r.id),0) FROM register_sessions r WHERE id=$1`, id).Scan(&expected, &total); err != nil {
