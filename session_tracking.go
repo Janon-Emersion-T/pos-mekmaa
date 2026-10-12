@@ -7,15 +7,15 @@ import (
 )
 
 const sessionColumns = `SELECT r.id,r.opened_at,r.closed_at,r.opening_cash,r.closing_cash,r.status,
-r.opening_cash+COALESCE((SELECT SUM(total) FROM sales WHERE session_id=r.id AND payment='cash' AND deleted_at IS NULL),0)+COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM petty_cash_entries WHERE session_id=r.id),0)+COALESCE((SELECT SUM(amount) FROM customer_payments WHERE session_id=r.id AND payment='cash'),0)-COALESCE((SELECT SUM(CASE WHEN payment='cash' THEN total ELSE cash_returned END) FROM refunds WHERE session_id=r.id),0),
+r.opening_cash+COALESCE((SELECT SUM(total) FROM sales WHERE session_id=r.id AND payment='cash' AND deleted_at IS NULL),0)+COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM petty_cash_entries WHERE session_id=r.id),0)+COALESCE((SELECT SUM(amount) FROM customer_payments p WHERE session_id=r.id AND payment='cash' AND NOT EXISTS(SELECT 1 FROM customer_payment_reversals WHERE payment_id=p.id)),0)-COALESCE((SELECT SUM(CASE WHEN payment='cash' THEN total ELSE cash_returned END) FROM refunds WHERE session_id=r.id),0),
 COALESCE(r.opened_by,0),COALESCE(r.opened_by_email,'Not recorded'),COALESCE(r.closed_by,0),COALESCE(r.closed_by_email,'Not recorded'),r.closing_expected_cash,
 (SELECT count(*) FROM sales WHERE session_id=r.id AND deleted_at IS NULL),
-COALESCE((SELECT SUM(total) FROM sales WHERE session_id=r.id AND deleted_at IS NULL),0),r.currency,COALESCE((SELECT SUM(total) FROM refunds WHERE session_id=r.id),0)
+COALESCE((SELECT SUM(total) FROM sales WHERE session_id=r.id AND deleted_at IS NULL),0),r.currency,COALESCE((SELECT SUM(total) FROM refunds WHERE session_id=r.id),0),COALESCE((SELECT SUM(total) FROM sales WHERE session_id=r.id AND payment='cash' AND deleted_at IS NULL),0),COALESCE((SELECT SUM(total) FROM sales WHERE session_id=r.id AND payment='card' AND deleted_at IS NULL),0),COALESCE((SELECT SUM(total) FROM sales WHERE session_id=r.id AND payment='credit' AND deleted_at IS NULL),0),COALESCE((SELECT SUM(amount) FROM customer_payments p WHERE session_id=r.id AND payment='cash' AND NOT EXISTS(SELECT 1 FROM customer_payment_reversals WHERE payment_id=p.id)),0),COALESCE((SELECT SUM(amount) FROM customer_payments p WHERE session_id=r.id AND payment='card' AND NOT EXISTS(SELECT 1 FROM customer_payment_reversals WHERE payment_id=p.id)),0),COALESCE((SELECT SUM(CASE WHEN payment='cash' THEN total ELSE cash_returned END) FROM refunds WHERE session_id=r.id),0),COALESCE((SELECT SUM(CASE WHEN payment='card' THEN total ELSE card_returned END) FROM refunds WHERE session_id=r.id),0),COALESCE((SELECT SUM(amount) FROM petty_cash_entries WHERE session_id=r.id AND direction='in'),0),COALESCE((SELECT SUM(amount) FROM petty_cash_entries WHERE session_id=r.id AND direction='out'),0),r.closing_reason
 FROM register_sessions r `
 
 func scanSession(row interface{ Scan(...any) error }, x *Session) error {
 	return row.Scan(&x.ID, &x.OpenedAt, &x.ClosedAt, &x.OpeningCash, &x.ClosingCash, &x.Status, &x.ExpectedCash,
-		&x.OpenedBy, &x.OpenedByEmail, &x.ClosedBy, &x.ClosedByEmail, &x.ClosingExpectedCash, &x.SaleCount, &x.SalesTotal, &x.Currency, &x.RefundTotal)
+		&x.OpenedBy, &x.OpenedByEmail, &x.ClosedBy, &x.ClosedByEmail, &x.ClosingExpectedCash, &x.SaleCount, &x.SalesTotal, &x.Currency, &x.RefundTotal, &x.CashSales, &x.CardSales, &x.CreditSales, &x.CashCollections, &x.CardCollections, &x.CashRefunds, &x.CardRefunds, &x.PettyIn, &x.PettyOut, &x.ClosingReason)
 }
 
 // Hold this user's register row until commit so checkout, cash movements, and closing

@@ -15,23 +15,27 @@ import (
 type CustomerBalance struct {
 	Currency    string `json:"currency"`
 	Outstanding int64  `json:"outstanding"`
+	Overdue     int64  `json:"overdue"`
 }
 type Customer struct {
-	ID       int64             `json:"id"`
-	Name     string            `json:"name"`
-	Phone    string            `json:"phone"`
-	Email    string            `json:"email"`
-	Address  string            `json:"address"`
-	Notes    string            `json:"notes"`
-	Created  time.Time         `json:"created"`
-	Balances []CustomerBalance `json:"balances"`
+	PaymentTermsDays int               `json:"paymentTermsDays"`
+	CreditLimit      *int              `json:"creditLimit"`
+	CreditCurrency   string            `json:"creditCurrency"`
+	ID               int64             `json:"id"`
+	Name             string            `json:"name"`
+	Phone            string            `json:"phone"`
+	Email            string            `json:"email"`
+	Address          string            `json:"address"`
+	Notes            string            `json:"notes"`
+	Created          time.Time         `json:"created"`
+	Balances         []CustomerBalance `json:"balances"`
 }
 
-const customerColumns = `SELECT id,name,phone,email,address,notes,created_at FROM customers `
+const customerColumns = `SELECT id,name,phone,email,address,notes,created_at,payment_terms_days,credit_limit,credit_currency FROM customers `
 
 func scanCustomer(row interface{ Scan(...any) error }, c *Customer) error {
 	c.Balances = []CustomerBalance{}
-	return row.Scan(&c.ID, &c.Name, &c.Phone, &c.Email, &c.Address, &c.Notes, &c.Created)
+	return row.Scan(&c.ID, &c.Name, &c.Phone, &c.Email, &c.Address, &c.Notes, &c.Created, &c.PaymentTermsDays, &c.CreditLimit, &c.CreditCurrency)
 }
 func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.QueryContext(r.Context(), customerColumns+`ORDER BY lower(name),id`)
@@ -57,7 +61,7 @@ func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not read customers")
 		return
 	}
-	rows, err = s.db.QueryContext(r.Context(), `SELECT customer_id,currency,SUM(outstanding) FROM (SELECT customer_id,currency,outstanding FROM credit_sale_balances WHERE deleted_at IS NULL UNION ALL SELECT customer_id,currency,outstanding FROM customer_opening_balance_totals) balances GROUP BY customer_id,currency HAVING SUM(outstanding)<>0 ORDER BY currency`)
+	rows, err = s.db.QueryContext(r.Context(), `SELECT customer_id,currency,SUM(outstanding),COALESCE(SUM(outstanding) FILTER(WHERE due_date<$1::date),0) FROM (SELECT b.customer_id,b.currency,b.outstanding,s.due_date FROM credit_sale_balances b JOIN sales s ON s.id=b.id WHERE b.deleted_at IS NULL UNION ALL SELECT customer_id,currency,outstanding,due_date FROM customer_opening_balance_totals) balances GROUP BY customer_id,currency HAVING SUM(outstanding)<>0 ORDER BY currency`, time.Now().In(businessLocation()).Format("2006-01-02"))
 	if err != nil {
 		problem(w, 500, "Could not load customer balances")
 		return
@@ -66,7 +70,7 @@ func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id int64
 		var b CustomerBalance
-		if err = rows.Scan(&id, &b.Currency, &b.Outstanding); err != nil {
+		if err = rows.Scan(&id, &b.Currency, &b.Outstanding, &b.Overdue); err != nil {
 			problem(w, 500, "Could not read customer balances")
 			return
 		}
@@ -89,6 +93,7 @@ func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
 		Notes           string `json:"notes"`
 		OpeningBalance  *int   `json:"openingBalance"`
 		OpeningCurrency string `json:"openingCurrency"`
+		OpeningDueDate  string `json:"openingDueDate,omitempty"`
 		RequestID       string `json:"requestId,omitempty"`
 	}
 	if !decode(w, r, &req) {
@@ -98,9 +103,15 @@ func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Opening balance must be between 0 and 100,000")
 		return
 	}
-	if r.Method != http.MethodPost && (req.OpeningBalance != nil || req.OpeningCurrency != "") {
+	if r.Method != http.MethodPost && (req.OpeningBalance != nil || req.OpeningCurrency != "" || req.OpeningDueDate != "") {
 		problem(w, 400, "Opening debt cannot be changed when editing contact details")
 		return
+	}
+	if req.OpeningDueDate != "" {
+		if _, err := time.Parse("2006-01-02", req.OpeningDueDate); err != nil {
+			problem(w, 400, "Enter a valid opening balance due date")
+			return
+		}
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Phone = strings.TrimSpace(req.Phone)
@@ -166,7 +177,7 @@ func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err == nil {
-			_, err = tx.ExecContext(r.Context(), `INSERT INTO customer_opening_balances(customer_id,amount,currency,created_by,cashier_email) VALUES($1,$2,$3,$4,$5)`, id, *req.OpeningBalance, currency, principal(r).ID, principal(r).Email)
+			_, err = tx.ExecContext(r.Context(), `INSERT INTO customer_opening_balances(customer_id,amount,currency,created_by,cashier_email,due_date) VALUES($1,$2,$3,$4,$5,NULLIF($6,'')::date)`, id, *req.OpeningBalance, currency, principal(r).ID, principal(r).Email, req.OpeningDueDate)
 		}
 	}
 	if err == nil && r.Method == http.MethodPost && req.RequestID != "" {
@@ -180,15 +191,19 @@ func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
 }
 
 type CustomerOpeningBalance struct {
-	ID          int64     `json:"id"`
-	Amount      int       `json:"amount"`
-	Currency    string    `json:"currency"`
-	PaidAmount  int       `json:"paidAmount"`
-	Outstanding int       `json:"outstanding"`
-	Created     time.Time `json:"created"`
+	DueDate        string    `json:"dueDate"`
+	OriginalAmount int       `json:"originalAmount"`
+	ID             int64     `json:"id"`
+	Amount         int       `json:"amount"`
+	Currency       string    `json:"currency"`
+	PaidAmount     int       `json:"paidAmount"`
+	Outstanding    int       `json:"outstanding"`
+	Created        time.Time `json:"created"`
 }
 
 type CustomerPayment struct {
+	Reversed         bool      `json:"reversed"`
+	ReversalReason   string    `json:"reversalReason"`
 	OpeningBalanceID *int64    `json:"openingBalanceId"`
 	ID               int64     `json:"id"`
 	SaleID           int64     `json:"saleId"`
@@ -241,14 +256,14 @@ func (s *Server) customerDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	var opening *CustomerOpeningBalance
 	var b CustomerOpeningBalance
-	err = s.db.QueryRowContext(r.Context(), `SELECT id,amount,currency,paid_amount,outstanding,created_at FROM customer_opening_balance_totals WHERE customer_id=$1`, id).Scan(&b.ID, &b.Amount, &b.Currency, &b.PaidAmount, &b.Outstanding, &b.Created)
+	err = s.db.QueryRowContext(r.Context(), `SELECT id,amount+adjustment_total,currency,paid_amount,outstanding,created_at,COALESCE(due_date::text,''),amount FROM customer_opening_balance_totals WHERE customer_id=$1`, id).Scan(&b.ID, &b.Amount, &b.Currency, &b.PaidAmount, &b.Outstanding, &b.Created, &b.DueDate, &b.OriginalAmount)
 	if err == nil {
 		opening = &b
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		problem(w, 500, "Could not read opening balance")
 		return
 	}
-	rows, err = s.db.QueryContext(r.Context(), `SELECT p.id,COALESCE(p.sale_id,0),p.session_id,p.amount,p.payment,p.currency,p.note,p.cashier_email,p.created_at,p.opening_balance_id FROM customer_payments p LEFT JOIN sales s ON s.id=p.sale_id LEFT JOIN customer_opening_balances b ON b.id=p.opening_balance_id WHERE s.customer_id=$1 OR b.customer_id=$1 ORDER BY p.id DESC`, id)
+	rows, err = s.db.QueryContext(r.Context(), `SELECT p.id,COALESCE(p.sale_id,0),p.session_id,p.amount,p.payment,p.currency,p.note,p.cashier_email,p.created_at,p.opening_balance_id,EXISTS(SELECT 1 FROM customer_payment_reversals WHERE payment_id=p.id),COALESCE((SELECT reason FROM customer_payment_reversals WHERE payment_id=p.id),'') FROM customer_payments p LEFT JOIN sales s ON s.id=p.sale_id LEFT JOIN customer_opening_balances b ON b.id=p.opening_balance_id WHERE s.customer_id=$1 OR b.customer_id=$1 ORDER BY p.id DESC`, id)
 	if err != nil {
 		problem(w, 500, "Could not load customer payments")
 		return
@@ -257,7 +272,7 @@ func (s *Server) customerDetail(w http.ResponseWriter, r *http.Request) {
 	payments := []CustomerPayment{}
 	for rows.Next() {
 		var p CustomerPayment
-		if rows.Scan(&p.ID, &p.SaleID, &p.SessionID, &p.Amount, &p.Payment, &p.Currency, &p.Note, &p.CashierEmail, &p.Created, &p.OpeningBalanceID) != nil {
+		if rows.Scan(&p.ID, &p.SaleID, &p.SessionID, &p.Amount, &p.Payment, &p.Currency, &p.Note, &p.CashierEmail, &p.Created, &p.OpeningBalanceID, &p.Reversed, &p.ReversalReason) != nil {
 			problem(w, 500, "Could not read customer payments")
 			return
 		}

@@ -41,6 +41,7 @@ async function setup(t, options = {}) {
       '/api/products':options.empty ? [] : [product], '/api/categories':[{id:1,name:'Drinks',productCount:1}],
       '/api/session':register, '/api/sessions':[], '/api/sales':[sale], '/api/sales/1':sale,
       '/api/inventory/movements':[], '/api/purchases':[], '/api/petty-cash':[], '/api/users':[],
+      '/api/register-cash-allocations':[],
       '/api/reports/daily':{date:'2026-09-25',timezone:'Asia/Colombo',rows:[]}, '/api/audit':[],
       '/api/checkout':sale, '/api/auth/password':{ok:true},
     };
@@ -74,11 +75,11 @@ test('temporary password opens a working password-change form', async t => {
   const {page,errors,requests} = await setup(t,{mustChangePassword:true});
   await ready(page);
   await page.locator('[name=currentPassword]').fill('temporary-password');
-  await page.locator('[name=newPassword]').fill('replacement-password');
-  await page.locator('[name=confirmPassword]').fill('replacement-password');
+  await page.locator('[name=newPassword]').fill('Asdf@1234');
+  await page.locator('[name=confirmPassword]').fill('Asdf@1234');
   await page.locator('[data-form=password] button').click();
   await page.waitForURL('**/login');
-  assert.deepEqual(requests.find(r=>r.path==='/api/auth/password').body,{currentPassword:'temporary-password',newPassword:'replacement-password'});
+  assert.deepEqual(requests.find(r=>r.path==='/api/auth/password').body,{currentPassword:'temporary-password',newPassword:'Asdf@1234'});
   assert.deepEqual(errors,[]);
 });
 test('unavailable browser storage does not break menu loading', async t => {

@@ -99,6 +99,12 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	if _, err = db.Exec(`INSERT INTO auth_sessions(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '1 hour')`, userID, tokenHash(token)); err != nil {
 		t.Fatal(err)
 	}
+	assignOpening := func(amount int) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO register_cash_allocations(user_id,amount,currency,assigned_by,assigned_by_email,note) VALUES($1,$2,(SELECT currency FROM store_settings WHERE id=1),$1,'test@example.com','test allocation')`, userID, amount); err != nil {
+			t.Fatal(err)
+		}
+	}
 	h := (&Server{db: db}).routes()
 	request := func(method, path, body string, status int) *httptest.ResponseRecorder {
 		t.Helper()
@@ -160,6 +166,7 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	path := fmt.Sprintf("/api/products/%d", created.ID)
 	request("PUT", path, strings.ReplaceAll(body, `"stock":8`, `"stock":0`), 200)
 	request("PUT", path, body, 400)
+	assignOpening(10000)
 	request("POST", "/api/session/open", `{"openingCash":10000}`, 201)
 	request("POST", "/api/checkout", fmt.Sprintf(`{"requestId":"product-price-mismatch","items":[{"productId":%d,"quantity":1}],"payment":"cash","cashReceived":12550,"expectedTotal":1}`, created.ID), 409)
 	request("POST", "/api/checkout", fmt.Sprintf(`{"requestId":"product-valid-checkout","items":[{"productId":%d,"quantity":1}],"payment":"cash","cashReceived":12550,"expectedTotal":12550}`, created.ID), 201)

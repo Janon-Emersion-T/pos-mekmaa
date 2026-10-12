@@ -40,8 +40,8 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if len(req.New) < 12 || len(req.New) > 72 || req.New == req.Current {
-		problem(w, 400, "Choose a different password of 12–72 bytes")
+	if !validPassword(req.New) || req.New == req.Current {
+		problem(w, 400, "Choose a different password of 8–72 bytes")
 		return
 	}
 	if !s.loginAllowed(r, "password-change:"+principal(r).Email) {

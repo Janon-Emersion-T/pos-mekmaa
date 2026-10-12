@@ -22,10 +22,10 @@ type ReceiptLine struct {
 	Refunded  int    `json:"refunded"`
 }
 
-const saleColumns = `SELECT s.id,s.created_at,s.total,s.payment,COALESCE((SELECT string_agg(quantity||' × '||product_name,', ' ORDER BY id) FROM sale_items WHERE sale_id=s.id),''),s.session_id,COALESCE(s.created_by,0),COALESCE(s.cashier_email,'Not recorded'),s.currency,s.currency_inferred,s.cash_received,s.change_due,COALESCE((SELECT SUM(total) FROM refunds WHERE sale_id=s.id),0),s.deleted_at,COALESCE(s.deletion_reason,''),s.customer_id,s.customer_name,CASE WHEN s.payment='credit' THEN COALESCE((SELECT paid_amount FROM credit_sale_balances WHERE id=s.id),0) ELSE s.total-COALESCE((SELECT SUM(total) FROM refunds WHERE sale_id=s.id),0) END,COALESCE((SELECT outstanding FROM credit_sale_balances WHERE id=s.id),0) FROM sales s `
+const saleColumns = `SELECT s.id,s.created_at,s.total,s.payment,COALESCE((SELECT string_agg(quantity||' × '||product_name,', ' ORDER BY id) FROM sale_items WHERE sale_id=s.id),''),s.session_id,COALESCE(s.created_by,0),COALESCE(s.cashier_email,'Not recorded'),s.currency,s.currency_inferred,s.cash_received,s.change_due,COALESCE((SELECT SUM(total) FROM refunds WHERE sale_id=s.id),0),s.deleted_at,COALESCE(s.deletion_reason,''),s.customer_id,s.customer_name,CASE WHEN s.payment='credit' THEN COALESCE((SELECT paid_amount FROM credit_sale_balances WHERE id=s.id),0) ELSE s.total-COALESCE((SELECT SUM(total) FROM refunds WHERE sale_id=s.id),0) END,COALESCE((SELECT outstanding FROM credit_sale_balances WHERE id=s.id),0) ,COALESCE(s.due_date::text,'') FROM sales s `
 
 func scanSale(row interface{ Scan(...any) error }, x *Sale) error {
-	return row.Scan(&x.ID, &x.Created, &x.Total, &x.Payment, &x.Items, &x.SessionID, &x.CreatedBy, &x.CashierEmail, &x.Currency, &x.CurrencyInferred, &x.CashReceived, &x.ChangeDue, &x.Refunded, &x.DeletedAt, &x.DeletionReason, &x.CustomerID, &x.CustomerName, &x.PaidAmount, &x.Outstanding)
+	return row.Scan(&x.ID, &x.Created, &x.Total, &x.Payment, &x.Items, &x.SessionID, &x.CreatedBy, &x.CashierEmail, &x.Currency, &x.CurrencyInferred, &x.CashReceived, &x.ChangeDue, &x.Refunded, &x.DeletedAt, &x.DeletionReason, &x.CustomerID, &x.CustomerName, &x.PaidAmount, &x.Outstanding, &x.DueDate)
 }
 func businessLocation() *time.Location {
 	name := os.Getenv("BUSINESS_TIMEZONE")

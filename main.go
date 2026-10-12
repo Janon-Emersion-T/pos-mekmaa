@@ -47,6 +47,8 @@ type Line struct {
 	UnitCost  int `json:"unitCost,omitempty"`
 }
 type Sale struct {
+	DueDate string `json:"dueDate"`
+
 	CustomerID       *int64        `json:"customerId"`
 	CustomerName     string        `json:"customerName"`
 	PaidAmount       int           `json:"paidAmount"`
@@ -70,6 +72,17 @@ type Sale struct {
 	CashierEmail string    `json:"cashierEmail"`
 }
 type Session struct {
+	CashSales       int    `json:"cashSales"`
+	CardSales       int    `json:"cardSales"`
+	CreditSales     int    `json:"creditSales"`
+	CashCollections int    `json:"cashCollections"`
+	CardCollections int    `json:"cardCollections"`
+	CashRefunds     int    `json:"cashRefunds"`
+	CardRefunds     int    `json:"cardRefunds"`
+	PettyIn         int    `json:"pettyIn"`
+	PettyOut        int    `json:"pettyOut"`
+	ClosingReason   string `json:"closingReason"`
+
 	Currency            string     `json:"currency"`
 	RefundTotal         int        `json:"refundTotal"`
 	OpenedBy            int64      `json:"openedBy"`
@@ -98,6 +111,11 @@ type User struct {
 type contextKey string
 
 const userContextKey contextKey = "user"
+const minPasswordBytes = 8
+
+func validPassword(password string) bool {
+	return len(password) >= minPasswordBytes && len(password) <= 72
+}
 
 type Server struct {
 	db            *sql.DB
@@ -181,8 +199,8 @@ func ensureSuperadmin(ctx context.Context, db *sql.DB) error {
 	}
 	email := strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL")))
 	password := os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")
-	if email == "" || !strings.Contains(email, "@") || len(password) < 12 || len(password) > 72 {
-		return errors.New("first launch requires BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD (12–72 bytes)")
+	if email == "" || !strings.Contains(email, "@") || !validPassword(password) {
+		return errors.New("first launch requires BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD (8–72 bytes)")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -322,6 +340,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		CustomerID           *int64 `json:"customerId,omitempty"`
 		InitialPayment       int    `json:"initialPayment,omitempty"`
 		InitialPaymentMethod string `json:"initialPaymentMethod,omitempty"`
+		DueDate              string `json:"dueDate,omitempty"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -384,8 +403,11 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var customerName string
+	var creditLimit *int
+	var creditCurrency string
+	var termsDays int
 	if req.CustomerID != nil {
-		err = tx.QueryRowContext(r.Context(), `SELECT name FROM customers WHERE id=$1 FOR SHARE`, *req.CustomerID).Scan(&customerName)
+		err = tx.QueryRowContext(r.Context(), `SELECT name,credit_limit,credit_currency,payment_terms_days FROM customers WHERE id=$1 FOR UPDATE`, *req.CustomerID).Scan(&customerName, &creditLimit, &creditCurrency, &termsDays)
 		if errors.Is(err, sql.ErrNoRows) {
 			problem(w, 400, "Customer not found")
 			return
@@ -441,9 +463,35 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Cash received applies only to cash sales")
 		return
 	}
+	var dueDate string
+	if req.Payment == "credit" {
+		dueDate = req.DueDate
+		if dueDate == "" {
+			dueDate = time.Now().In(businessLocation()).AddDate(0, 0, termsDays).Format("2006-01-02")
+		}
+		if _, e := time.Parse("2006-01-02", dueDate); e != nil {
+			problem(w, 400, "Enter a valid payment due date")
+			return
+		}
+		if creditLimit != nil {
+			if creditCurrency != session.Currency {
+				problem(w, 409, "Customer credit limit is set in another currency. Ask an administrator to update it")
+				return
+			}
+			var outstanding int64
+			if tx.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(outstanding),0) FROM (SELECT outstanding FROM credit_sale_balances WHERE customer_id=$1 AND currency=$2 AND deleted_at IS NULL UNION ALL SELECT outstanding FROM customer_opening_balance_totals WHERE customer_id=$1 AND currency=$2) b`, *req.CustomerID, session.Currency).Scan(&outstanding) != nil {
+				problem(w, 500, "Could not check credit limit")
+				return
+			}
+			if outstanding+int64(total-req.InitialPayment) > int64(*creditLimit) {
+				problem(w, 409, "This sale exceeds the customer's credit limit")
+				return
+			}
+		}
+	}
 	var id int64
 	created := time.Now()
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by,cashier_email,currency,cash_received,change_due,customer_id,customer_name) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID, principal(r).Email, session.Currency, req.CashReceived, change, req.CustomerID, customerName).Scan(&id, &created); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO sales(session_id,total,payment,created_by,cashier_email,currency,cash_received,change_due,customer_id,customer_name,due_date) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULLIF($11,'')::date) RETURNING id,created_at`, session.ID, total, req.Payment, principal(r).ID, principal(r).Email, session.Currency, req.CashReceived, change, req.CustomerID, customerName, dueDate).Scan(&id, &created); err != nil {
 		problem(w, 500, "Could not save sale")
 		return
 	}
@@ -463,6 +511,7 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		names = append(names, fmt.Sprintf("%d × %s", x.Quantity, x.Name))
 	}
 	result := Sale{ID: id, Created: created, Total: total, Payment: req.Payment, Items: strings.Join(names, ", "), SessionID: session.ID, CreatedBy: principal(r).ID, CashierEmail: principal(r).Email, Currency: session.Currency, CashReceived: req.CashReceived, ChangeDue: change}
+	result.DueDate = dueDate
 	result.CustomerID, result.CustomerName, result.PaidAmount = req.CustomerID, customerName, total
 	if req.Payment == "credit" {
 		result.PaidAmount, result.Outstanding = req.InitialPayment, total-req.InitialPayment
@@ -503,9 +552,11 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		OpeningCash int    `json:"openingCash"`
-		ClosingCash int    `json:"closingCash"`
-		SessionID   *int64 `json:"sessionId"`
+		OpeningCash   int    `json:"openingCash"`
+		ClosingCash   int    `json:"closingCash"`
+		SessionID     *int64 `json:"sessionId"`
+		ClosingReason string `json:"closingReason"`
+		ExpectedCash  *int   `json:"expectedCash"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -521,10 +572,33 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback()
+		var active bool
+		if tx.QueryRowContext(r.Context(), `SELECT active FROM users WHERE id=$1 FOR SHARE`, principal(r).ID).Scan(&active) != nil || !active {
+			problem(w, 403, "Your account is disabled")
+			return
+		}
 		var currency string
 		if tx.QueryRowContext(r.Context(), `SELECT currency FROM store_settings WHERE id=1 FOR SHARE`).Scan(&currency) != nil {
 			problem(w, 500, "Could not load currency")
 			return
+		}
+		var allocationID *int64
+		if principal(r).Role != "superadmin" {
+			var id int64
+			var amount int
+			if err = tx.QueryRowContext(r.Context(), `SELECT id,amount FROM register_cash_allocations WHERE user_id=$1 AND status='pending' AND currency=$2 ORDER BY id DESC LIMIT 1 FOR UPDATE`, principal(r).ID, currency).Scan(&id, &amount); errors.Is(err, sql.ErrNoRows) {
+				problem(w, 409, "Ask the superadmin to assign your opening cash before starting a register session")
+				return
+			}
+			if err != nil {
+				problem(w, 500, "Could not read assigned opening cash")
+				return
+			}
+			if amount != req.OpeningCash {
+				problem(w, 409, "Opening cash must match the amount assigned by the superadmin")
+				return
+			}
+			allocationID = &id
 		}
 		if auditActor(r.Context(), tx, principal(r)) != nil {
 			problem(w, 500, "Could not record actor")
@@ -536,7 +610,17 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 			problem(w, 409, "You already have an open register session")
 			return
 		}
-		if err != nil || tx.Commit() != nil {
+		if err != nil {
+			problem(w, 500, "Could not open session")
+			return
+		}
+		if allocationID != nil {
+			if _, err = tx.ExecContext(r.Context(), `UPDATE register_cash_allocations SET status='used',used_session_id=$1,used_at=now() WHERE id=$2`, id, *allocationID); err != nil {
+				problem(w, 500, "Could not use assigned opening cash")
+				return
+			}
+		}
+		if tx.Commit() != nil {
 			problem(w, 500, "Could not open session")
 			return
 		}
@@ -562,12 +646,10 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 		problem(w, 409, "The register session has changed. Refresh before closing.")
 		return
 	}
-	_, err = tx.ExecContext(r.Context(), `UPDATE register_sessions SET status='closed',closed_at=now(),closing_cash=$1,closed_by=$2,closed_by_email=$3,closing_expected_cash=$4 WHERE id=$5`, req.ClosingCash, principal(r).ID, principal(r).Email, x.ExpectedCash, x.ID)
-	if err != nil || tx.Commit() != nil {
-		problem(w, 500, "Could not close session")
+	if !finishSessionClose(w, r, tx, x, req.ClosingCash, req.ExpectedCash, req.ClosingReason, false) {
 		return
 	}
-	respond(w, 200, map[string]any{"expectedCash": x.ExpectedCash, "closingCash": req.ClosingCash, "difference": req.ClosingCash - x.ExpectedCash})
+
 }
 func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -592,6 +674,7 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		RequestID string `json:"requestId"`
 		Direction string `json:"direction"`
 		Amount    int    `json:"amount"`
 		Category  string `json:"category"`
@@ -604,16 +687,12 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Direction, amount and category are required")
 		return
 	}
-	tx, err := s.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		problem(w, 500, "Could not save entry")
+	tx, hash := beginOperation(w, r, s, req.RequestID, "petty", req)
+	if tx == nil {
 		return
 	}
 	defer tx.Rollback()
-	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
-		problem(w, 500, "Could not record actor")
-		return
-	}
+	var err error
 	x, err := s.lockedSession(r.Context(), tx, principal(r).ID)
 	if err != nil {
 		problem(w, 409, "Open your own register session first")
@@ -621,11 +700,11 @@ func (s *Server) pettyCash(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	err = tx.QueryRowContext(r.Context(), `INSERT INTO petty_cash_entries(session_id,direction,amount,category,note,created_by,currency) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, x.ID, req.Direction, req.Amount, req.Category, req.Note, principal(r).ID, x.Currency).Scan(&id)
-	if err != nil || tx.Commit() != nil {
+	if err != nil {
 		problem(w, 500, "Could not save entry")
 		return
 	}
-	respond(w, 201, map[string]any{"id": id})
+	finishOperation(w, r, tx, req.RequestID, "petty", hash, map[string]any{"id": id})
 }
 func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -650,6 +729,7 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		RequestID     string `json:"requestId"`
 		Supplier      string `json:"supplier"`
 		InvoiceNumber string `json:"invoiceNumber"`
 		Items         []Line `json:"items"`
@@ -661,16 +741,12 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Supplier and items are required")
 		return
 	}
-	tx, err := s.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		problem(w, 500, "Could not start purchase")
+	tx, hash := beginOperation(w, r, s, req.RequestID, "purchase", req)
+	if tx == nil {
 		return
 	}
 	defer tx.Rollback()
-	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
-		problem(w, 500, "Could not record actor")
-		return
-	}
+	var err error
 	total := 0
 	for _, x := range req.Items {
 		if x.ProductID < 1 || x.Quantity < 1 || x.UnitCost < 0 {
@@ -702,15 +778,16 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if tx.Commit() != nil {
-		problem(w, 500, "Could not receive purchase")
-		return
-	}
-	respond(w, 201, map[string]any{"id": id, "total": total})
+	finishOperation(w, r, tx, req.RequestID, "purchase", hash, map[string]any{"id": id, "total": total})
 }
 func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		rows, err := s.db.QueryContext(r.Context(), `SELECT m.id,m.created_at,m.product_id,p.name,m.kind,m.quantity,m.note FROM inventory_movements m JOIN products p ON p.id=m.product_id ORDER BY m.id DESC LIMIT 200`)
+		from, to, err := dateBounds(r.URL.Query().Get("date"), r.URL.Query().Get("date"))
+		if err != nil {
+			problem(w, 400, "Enter a valid adjustment date")
+			return
+		}
+		rows, err := s.db.QueryContext(r.Context(), `SELECT m.id,m.created_at,m.product_id,p.name,m.kind,m.quantity,m.note FROM inventory_movements m JOIN products p ON p.id=m.product_id WHERE ($1::timestamptz IS NULL OR m.created_at >= $1) AND ($2::timestamptz IS NULL OR m.created_at < $2) ORDER BY m.id DESC LIMIT 200`, optionalTime(from), optionalTime(to))
 		if err != nil {
 			problem(w, 500, "Could not load movements")
 			return
@@ -912,8 +989,8 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-	if !strings.Contains(req.Email, "@") || strings.ContainsAny(req.Email, "<>\"' \t\r\n") || len(req.Password) < 10 || !hasRole(req.Role, "superadmin", "admin", "cashier") {
-		problem(w, 400, "A valid email, role, and password of at least 10 characters are required")
+	if !strings.Contains(req.Email, "@") || strings.ContainsAny(req.Email, "<>\"' \t\r\n") || !validPassword(req.Password) || !hasRole(req.Role, "superadmin", "admin", "cashier") {
+		problem(w, 400, "A valid email, role, and password of 8–72 bytes are required")
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -963,6 +1040,22 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not record actor")
 		return
 	}
+	var staffID int64
+	if tx.QueryRowContext(r.Context(), `SELECT id FROM users WHERE id=$1 FOR UPDATE`, id).Scan(&staffID) != nil {
+		problem(w, 404, "User not found")
+		return
+	}
+	if req.Active != nil && !*req.Active {
+		var opened bool
+		if tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM register_sessions WHERE opened_by=$1 AND status='open')`, id).Scan(&opened) != nil {
+			problem(w, 500, "Could not check staff session")
+			return
+		}
+		if opened {
+			problem(w, 409, "Close this staff member's register session before disabling the account. Administrators can close it from Register session")
+			return
+		}
+	}
 	if req.Role != "" {
 		if !hasRole(req.Role, "superadmin", "admin", "cashier") {
 			problem(w, 400, "Invalid role")
@@ -983,8 +1076,8 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Password != "" {
-		if len(req.Password) < 10 {
-			problem(w, 400, "Password must be at least 10 characters")
+		if !validPassword(req.Password) {
+			problem(w, 400, "Password must be 8–72 bytes")
 			return
 		}
 		hash, e := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -1019,6 +1112,8 @@ func (s *Server) routes() http.Handler {
 	private.HandleFunc("GET /api/auth/me", s.me)
 	s.operationRoutes(private)
 	s.customerRoutes(private)
+	s.controlRoutes(private)
+	s.ownerControlRoutes(private)
 	private.Handle("GET /api/settings", requireRoles(s.settings, "superadmin", "admin", "cashier"))
 	private.Handle("PUT /api/settings", requireRoles(s.updateSettings, "superadmin", "admin"))
 	private.Handle("GET /api/categories", requireRoles(s.categories, "superadmin", "admin", "cashier"))

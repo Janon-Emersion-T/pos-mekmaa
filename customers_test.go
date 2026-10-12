@@ -86,6 +86,12 @@ func TestCustomersAndCreditSales(t *testing.T) {
 		}
 		return n
 	}
+	assignOpening := func(amount int) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO register_cash_allocations(user_id,amount,currency,assigned_by,assigned_by_email,note) VALUES($1,$2,(SELECT currency FROM store_settings WHERE id=1),$1,'cashier@example.test','test allocation')`, userID, amount); err != nil {
+			t.Fatal(err)
+		}
+	}
 	usersBefore := scalar(`SELECT count(*) FROM users`)
 	request("POST", "/api/customers", `{"name":" "}`, 400)
 	request("POST", "/api/customers", `{"name":"Jane","email":"not-an-email"}`, 400)
@@ -97,6 +103,7 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	}
 	request("GET", "/customers", "", 200)
 	request("GET", customerPath, "", 200)
+	assignOpening(1000)
 	sessionID := idFrom(request("POST", "/api/session/open", `{"openingCash":1000}`, 201))
 	checkout := func(key string, cid int64, initial int, method string) string {
 		return fmt.Sprintf(`{"requestId":%q,"items":[{"productId":%d,"quantity":2}],"payment":"credit","customerId":%d,"initialPayment":%d,"initialPaymentMethod":%q,"sessionId":%d,"expectedTotal":10000}`, key, productID, cid, initial, method, sessionID)
@@ -241,6 +248,7 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	request("POST", "/api/session/close", fmt.Sprintf(`{"sessionId":%d,"closingCash":0}`, sessionID), 200)
 	request("POST", path, payment("credit-payment-closed-till", 1, "cash", sessionID), 409)
 	originalSession := sessionID
+	assignOpening(500)
 	sessionID = idFrom(request("POST", "/api/session/open", `{"openingCash":500}`, 201))
 	settlement := fmt.Sprintf(`{"requestId":"credit-final-settlement","saleId":%d,"sessionId":%d,"amount":8500,"payment":"cash"}`, cardID, sessionID)
 	request("POST", path, settlement, 201)
@@ -251,6 +259,7 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	}
 	request("POST", "/api/session/close", fmt.Sprintf(`{"sessionId":%d,"closingCash":9000}`, sessionID), 200)
 	request("PUT", "/api/settings", `{"currency":"LKR"}`, 200)
+	assignOpening(0)
 	sessionID = idFrom(request("POST", "/api/session/open", `{"openingCash":0}`, 201))
 	req := fmt.Sprintf(`{"requestId":"credit-wrong-currency","saleId":%d,"sessionId":%d,"amount":100,"payment":"cash"}`, cardID, sessionID)
 	request("POST", path, req, 409)
@@ -295,6 +304,7 @@ func TestCustomersAndCreditSales(t *testing.T) {
 		request("POST", openingPaymentPath, openingPayment("historical-closed-register", 100, "cash"), 409)
 		request("PUT", openingPath, `{"name":"Renamed debtor","openingBalance":0}`, 400)
 		request("PUT", openingPath, `{"name":"Renamed debtor"}`, 200)
+		assignOpening(0)
 		sessionID = idFrom(request("POST", "/api/session/open", `{"openingCash":0}`, 201))
 		cash(0)
 		request("POST", customerPath+"/payments", openingPayment("historical-wrong-customer", 100, "cash"), 404)

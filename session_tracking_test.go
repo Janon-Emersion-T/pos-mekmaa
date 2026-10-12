@@ -63,6 +63,15 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 		fn(w, r)
 		return w
 	}
+	assignOpening := func(actor *User, amount int) {
+		t.Helper()
+		if actor.Role == "superadmin" {
+			return
+		}
+		if _, err := db.Exec(`INSERT INTO register_cash_allocations(user_id,amount,currency,assigned_by,assigned_by_email,note) VALUES($1,$2,(SELECT currency FROM store_settings WHERE id=1),$1,$3,'test allocation')`, actor.ID, amount, actor.Email); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Each attempted sale needs its own key so idempotency cannot replay an earlier sale.
 	order := func(requestID string) string {
 		return fmt.Sprintf(`{"requestId":%q,"items":[{"productId":%d,"quantity":1}],"payment":"cash","cashReceived":450,"expectedTotal":450}`, requestID, productID)
@@ -72,6 +81,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 	}
 	open := func(actor *User) int64 {
 		t.Helper()
+		assignOpening(actor, 1000)
 		w := call(s.sessions, actor, "POST", "/api/session/open", `{"openingCash":1000}`)
 		if w.Code != 201 {
 			t.Fatalf("open: %d %s", w.Code, w.Body.String())
@@ -202,6 +212,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 	assertStatus(call(s.checkout, cashier, "POST", "/api/checkout", order("session-initial-checkout")), 200)
 	assertStatus(call(s.sessions, opener, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d}`, foreignID)), 200)
 	// Simultaneous attempts by the same user must open exactly one session.
+	assignOpening(cashier, 0)
 	var opened [2]*httptest.ResponseRecorder
 	var openWG sync.WaitGroup
 	for i := range opened {

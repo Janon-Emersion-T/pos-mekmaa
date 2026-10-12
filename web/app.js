@@ -74,6 +74,7 @@ let products = [],
   purchases = [],
   petty = [],
   movements = [],
+  openingAllocations = [],
   users = [],
   session = null,
   sessionHistory = [],
@@ -178,6 +179,7 @@ function renderCart() {
   $("#session-notice").innerHTML = session
     ? `<p class="font-medium">Session #${session.id} · ${escapeHTML(currentUser?.email || "")}</p><p>Opened by ${escapeHTML(session.openedByEmail)} · ${new Date(session.openedAt).toLocaleString()}</p>`
     : '<p class="font-medium">Open your own register session to complete a sale.</p><a href="/session" data-page="session" class="text-orange-600">Open register →</a>';
+  renderPosInsights();
   renderCustomerPicker();
   if (pendingCheckout) $("#session-notice").innerHTML = '<p class="font-medium">A checkout is awaiting confirmation.</p><p>Recover it before starting another sale. Retrying will not duplicate the sale.</p>';
 }
@@ -287,7 +289,13 @@ function renderOther() {
       </label>
       <p class="mt-3 text-xs text-gray-500">Current format: ${money(123456)}</p>
       <button class="mt-5 rounded-lg bg-accent px-5 py-3 text-sm text-white disabled:opacity-50">Save settings</button>
-    </form>`;
+    </form>${currentUser?.role === "superadmin" ? `<form data-form="database-reset" class="mt-7 max-w-md rounded-xl border border-red-200 bg-white p-5">
+      <h2 class="font-semibold text-red-700">Reset database to zero</h2>
+      <p class="mt-2 text-xs leading-5 text-gray-500">Removes products, customers, sales, sessions, stock movements, purchases, petty cash, refunds, and pending writes. Staff users and store currency stay in place.</p>
+      <label class="mt-5 block text-xs font-medium text-gray-600">Your password<input name="password" type="password" required autocomplete="current-password" class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3"></label>
+      <label class="mt-3 block text-xs font-medium text-gray-600">Type RESET DATABASE<input name="confirmation" required class="mt-2 h-11 w-full rounded-lg border border-gray-200 px-3"></label>
+      <button class="mt-5 rounded-lg bg-red-600 px-5 py-3 text-sm text-white disabled:opacity-50">Reset database</button>
+    </form>` : ""}`;
   } else if (page === "users") {
     title = "Staff users";
     desc =
@@ -333,17 +341,30 @@ function renderOther() {
           )
           .join(
             "",
-          )}</div><form data-form="close-session" data-session-id="${session.id}" class="mt-6 max-w-md rounded-xl border bg-white p-5">${amountField("Counted closing cash", "closingCash")}<button class="mt-4 rounded-lg bg-ink px-5 py-3 text-sm text-white">Close session</button></form>`
-      : `<form data-form="open-session" class="max-w-md rounded-xl border bg-white p-5">${amountField("Opening cash", "openingCash", "0.00")}<button class="mt-4 rounded-lg bg-accent px-5 py-3 text-sm text-white">Open register session</button></form>`;
+          )}</div><form data-form="close-session" data-session-id="${session.id}" class="mt-6 max-w-md rounded-xl border bg-white p-5">${sessionBreakdown(session)}${amountField("Counted closing cash", "closingCash")}${optionalCustomerField("Reason (required for a cash difference)","closingReason","",500)}<button class="mt-4 rounded-lg bg-ink px-5 py-3 text-sm text-white">Close session</button></form>`
+      : `<form data-form="open-session" class="max-w-md rounded-xl border bg-white p-5">${assignedCashNotice()}${amountField("Opening cash", "openingCash", assignedOpeningCashValue())}<button class="mt-4 rounded-lg bg-accent px-5 py-3 text-sm text-white">Open register session</button></form>`;
     body += '<h2 class="mb-3 mt-7 font-semibold">Session history</h2><p class="mb-4 text-xs text-gray-500">Latest 100 sessions. Expected cash at close is preserved even if a sale is later deleted.</p>' + table(
       ["Session", "Opened by", "Opened", "Closed by", "Closed", "Status", "Sales", "Sales total", "Expected at close", "Counted cash", "Difference"],
       sessionHistory.map((x) => `<tr class="border-b"><td class="p-4"><a href="/sales?sessionId=${x.id}" data-page="sales" class="text-orange-600">#${x.id}</a></td><td class="p-4">${escapeHTML(x.openedByEmail)}</td><td class="p-4">${new Date(x.openedAt).toLocaleString()}</td><td class="p-4">${x.closedAt ? escapeHTML(x.closedByEmail) : "—"}</td><td class="p-4">${x.closedAt ? new Date(x.closedAt).toLocaleString() : "—"}</td><td class="p-4 capitalize">${x.status}</td><td class="p-4">${x.saleCount}</td><td class="p-4">${money(x.salesTotal, x.currency)}</td><td class="p-4">${x.closingExpectedCash == null ? (x.closedAt ? "Not recorded" : "—") : money(x.closingExpectedCash, x.currency)}</td><td class="p-4">${x.closingCash == null ? "—" : money(x.closingCash, x.currency)}</td><td class="p-4">${x.closingExpectedCash == null || x.closingCash == null ? "—" : money(x.closingCash - x.closingExpectedCash, x.currency)}</td></tr>`).join("")
     );
   } else if (page === "inventory") {
     title = "Inventory";
-    desc = "Current stock plus an audit trail. No expiry or batch tracking.";
+    desc = "Current stock, daily adjustments, and an audit trail. No expiry or batch tracking.";
+    const dailyAdjustments = movements.filter(m => m.kind === "adjustment");
+    const added = dailyAdjustments.filter(m => m.quantity > 0).reduce((sum,m)=>sum+m.quantity,0);
+    const removed = dailyAdjustments.filter(m => m.quantity < 0).reduce((sum,m)=>sum+Math.abs(m.quantity),0);
     body =
-      `<form data-form="adjust" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-4"><label class="text-xs">Product<select name="productId" required class="mt-2 h-11 w-full rounded-lg border px-3">${products.map((p) => `<option value="${p.id}">${escapeHTML(p.name)}</option>`)}</select></label>${field("Quantity (+ or −)", "quantity", "number")}${field("Reason", "note")}<button class="mt-6 h-11 rounded-lg bg-ink text-sm text-white">Record adjustment</button></form>` +
+      filterForm("inventory-filter", filterInput("Adjustment date", "date", "date")) +
+      `<div class="mb-6 grid gap-3 sm:grid-cols-3">${[["Adjusted items",dailyAdjustments.length],["Added units",added],["Removed units",removed]].map(x=>`<div class="rounded-xl border bg-white p-5"><p class="text-xs text-gray-400">${x[0]}</p><p class="mt-2 text-xl font-semibold">${x[1]}</p></div>`).join("")}</div>` +
+      `<form data-form="adjust" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-4"><label class="text-xs">Product<select name="productId" required class="mt-2 h-11 w-full rounded-lg border px-3">${products.map((p) => `<option value="${p.id}">${escapeHTML(p.name)}</option>`)}</select></label>${field("Quantity (+ or −)", "quantity", "number")}${field("Reason", "note")}<button class="mt-6 h-11 rounded-lg bg-ink text-sm text-white">Record daily adjustment</button></form>` +
+      `<h2 class="mb-3 font-semibold">Daily stock adjustments</h2>` +
+      table(
+        ["Date", "Product", "Quantity", "Reason"],
+        dailyAdjustments
+          .map((m) => `<tr class="border-b"><td class="p-4">${new Date(m.created).toLocaleString()}</td><td class="p-4">${escapeHTML(m.product)}</td><td class="p-4 font-semibold ${m.quantity > 0 ? "text-green-600" : "text-red-500"}">${m.quantity > 0 ? "+" : ""}${m.quantity}</td><td class="p-4">${escapeHTML(m.note)}</td></tr>`)
+          .join(""),
+      ) +
+      `<h2 class="mb-3 mt-7 font-semibold">Current stock</h2>` +
       table(
         ["Product", "Category", "Cost", "Price", "Stock", "Reorder"],
         products
@@ -353,7 +374,7 @@ function renderOther() {
           )
           .join(""),
       ) +
-      `<h2 class="mb-3 mt-7 font-semibold">Recent movements</h2>` +
+      `<h2 class="mb-3 mt-7 font-semibold">Recent movements for selected day</h2>` +
       table(
         ["Date", "Product", "Type", "Quantity", "Note"],
         movements
@@ -393,8 +414,11 @@ function renderOther() {
           .join(""),
       );
   }
+  if (page === "session") body += adminSessionControls();
+  body = pendingWriteBanner() + body;
   $("#other-page").innerHTML =
     `<div class="mb-7"><h1 class="text-2xl font-semibold">${title}</h1><p class="mt-2 text-sm text-gray-400">${desc}</p></div>${body}`;
+  if (page === "customers" && customerAccount) $("#customer-account")?.scrollIntoView({block:"start"});
   if (!products.length && ["inventory", "purchases"].includes(page)) {
     $("#other-page").querySelectorAll("form button, form input, form select").forEach((el) => el.disabled = true);
     $("#other-page").insertAdjacentHTML("afterbegin", '<p class="mb-4 text-sm text-gray-500">Add a product in <a href="/products" data-page="products" class="text-orange-600">Products</a> before recording stock.</p>');
@@ -404,17 +428,21 @@ async function loadPage() {
   const request = ++pageRequest, requestedPage = page;
   try {
     const customerId = new URLSearchParams(location.search).get("id");
-    const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements", purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
-    const [savedSettings, savedProducts, savedSession, records, savedCategories, savedCustomers] = await Promise.all([
+    const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements"+location.search, purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
+    const needUsers = requestedPage === "users" || (requestedPage === "session" && currentUser?.role === "superadmin");
+    const [savedSettings, savedProducts, savedSession, records, savedCategories, savedCustomers, savedAllocations, savedUsersForControls] = await Promise.all([
       api("/api/settings"), api("/api/products"), api("/api/session"),
       endpoints[requestedPage] ? api(endpoints[requestedPage]) : Promise.resolve(null),
-      api("/api/categories"), api("/api/customers"),
+      api("/api/categories"), api("/api/customers"), api("/api/register-cash-allocations"),
+      needUsers ? api("/api/users") : Promise.resolve(users),
     ]);
     if (request !== pageRequest) return;
     applySettings(savedSettings);
     products = savedProducts;
     productCategories = savedCategories;
     customers = savedCustomers;
+    openingAllocations = savedAllocations;
+    users = savedUsersForControls;
     if (requestedPage === "customers") customerAccount = records;
     session = savedSession;
     if (requestedPage === "sales") sales = records;
@@ -424,7 +452,6 @@ async function loadPage() {
     if (requestedPage === "inventory") movements = records;
     if (requestedPage === "purchases") purchases = records;
     if (requestedPage === "petty") petty = records;
-    if (requestedPage === "users") users = records;
     renderProducts();
     renderCart();
     renderOther();
@@ -650,7 +677,7 @@ $("#other-page").addEventListener("submit", async (e) => {
   const f = e.target,
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
-  if (["sale-filter","report-filter","audit-filter","password","customer","customer-filter","customer-payment"].includes(kind)) return;
+  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","database-reset"].includes(kind)) return;
   if (f.dataset.saving) return;
   f.dataset.saving = "true";
   const submit = f.querySelector('button:not([type="button"])');
@@ -718,37 +745,12 @@ $("#other-page").addEventListener("submit", async (e) => {
       const result = await api("/api/session/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ closingCash: minorUnits(data.closingCash), sessionId: Number(f.dataset.sessionId) }),
+        body: JSON.stringify({ closingCash: minorUnits(data.closingCash), sessionId: Number(f.dataset.sessionId), expectedCash: session.expectedCash, closingReason: data.closingReason }),
       });
       toast(`Session closed · difference ${money(result.difference)}`);
     }
-    if (kind === "petty")
-      await api("/api/petty-cash", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          direction: data.direction,
-          amount: minorUnits(data.amount),
-          category: data.category,
-          note: data.note,
-        }),
-      });
-    if (kind === "purchase")
-      await api("/api/purchases", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          supplier: data.supplier,
-          invoiceNumber: data.invoiceNumber,
-          items: [
-            {
-              productId: Number(data.productId),
-              quantity: Number(data.quantity),
-              unitCost: minorUnits(data.unitCost),
-            },
-          ],
-        }),
-      });
+    if (kind === "petty") await durableWrite("petty", "/api/petty-cash", {direction:data.direction,amount:minorUnits(data.amount),category:data.category,note:data.note,sessionId:session?.id});
+    if (kind === "purchase") await durableWrite("purchase", "/api/purchases", {supplier:data.supplier,invoiceNumber:data.invoiceNumber,items:[{productId:Number(data.productId),quantity:Number(data.quantity),unitCost:minorUnits(data.unitCost)}]});
     if (kind === "adjust")
       await api("/api/inventory/adjustments", {
         method: "POST",

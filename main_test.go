@@ -58,6 +58,15 @@ func TestRoleChecks(t *testing.T) {
 	}
 }
 
+func TestPasswordPolicyAllowsRequestedPassword(t *testing.T) {
+	if !validPassword("Asdf@1234") {
+		t.Fatal("Asdf@1234 should be accepted by password policy")
+	}
+	if validPassword("short") {
+		t.Fatal("very short passwords should still be rejected")
+	}
+}
+
 func TestSecureCookieBehindProxy(t *testing.T) {
 	s := &Server{}
 	r := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
