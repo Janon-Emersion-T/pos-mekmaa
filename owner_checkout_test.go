@@ -47,7 +47,7 @@ func TestOwnerCostPriceCreditCheckout(t *testing.T) {
 	}
 	defer db.Close()
 
-	var ownerID, cashierID, productID int64
+	var ownerID, cashierID, adminID, productID int64
 	if err := db.QueryRow(`
 		SELECT id FROM customers WHERE is_owner=true
 	`).Scan(&ownerID); err != nil {
@@ -63,10 +63,21 @@ func TestOwnerCostPriceCreditCheckout(t *testing.T) {
 	}
 
 	if err := db.QueryRow(`
+		INSERT INTO users(email,password_hash,role)
+		VALUES('owner-test-admin@example.test','unused','admin')
+		RETURNING id
+	`).Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.QueryRow(`
 		INSERT INTO products(name,category,price,cost,stock)
 		VALUES('Owner test item','Test',5000,3000,100)
 		RETURNING id
 	`).Scan(&productID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE store_settings SET currency='LKR' WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -75,6 +86,14 @@ func TestOwnerCostPriceCreditCheckout(t *testing.T) {
 		INSERT INTO auth_sessions(user_id,token_hash,expires_at)
 		VALUES($1,$2,now()+interval '1 hour')
 	`, cashierID, tokenHash(token)); err != nil {
+		t.Fatal(err)
+	}
+
+	adminToken := strings.Repeat("owner-admin", 8)
+	if _, err := db.Exec(`
+		INSERT INTO auth_sessions(user_id,token_hash,expires_at)
+		VALUES($1,$2,now()+interval '1 hour')
+	`, adminID, tokenHash(adminToken)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,6 +107,19 @@ func TestOwnerCostPriceCreditCheckout(t *testing.T) {
 		h.ServeHTTP(w, r)
 		if w.Code != want {
 			t.Fatalf("%s %s: got %d want %d: %s",
+				method, path, w.Code, want, w.Body.String())
+		}
+		return w
+	}
+
+	adminRequest := func(method, path, body string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.AddCookie(&http.Cookie{Name: "counter_session", Value: adminToken})
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s %s as admin: got %d want %d: %s",
 				method, path, w.Code, want, w.Body.String())
 		}
 		return w
@@ -289,5 +321,86 @@ func TestOwnerCostPriceCreditCheckout(t *testing.T) {
 
 	request("POST", paymentPath,
 		paymentBody("owner-payment-after-settled", 1, "cash"), 409)
+
+	// owner daily reconciliation: the credit sale and repayments
+	// must appear once in the daily financial report.
+	var reportDate string
+	if err := db.QueryRow(
+		`SELECT to_char(created_at AT TIME ZONE $1, 'YYYY-MM-DD') FROM sales WHERE id=$2`,
+		businessLocation().String(), sale.ID,
+	).Scan(&reportDate); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := "/api/reports/daily?date=" + reportDate
+	request("GET", reportPath, "", 403)
+
+	var daily struct {
+		Rows []DailyRow `json:"rows"`
+	}
+	if err := json.Unmarshal(
+		adminRequest("GET", reportPath, "", 200).Body.Bytes(),
+		&daily,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var row *DailyRow
+	for i := range daily.Rows {
+		if daily.Rows[i].Currency == "LKR" {
+			row = &daily.Rows[i]
+			break
+		}
+	}
+	if row == nil {
+		t.Fatal("Owner financial reconciliation: missing LKR report")
+	}
+
+	if row.SaleCount != 1 ||
+		row.CreditSales != 6000 ||
+		row.CashSales != 0 ||
+		row.CardSales != 0 ||
+		row.CashCollections != 2000 ||
+		row.CardCollections != 4000 ||
+		row.CreditReturns != 0 {
+		t.Fatalf("Owner financial reconciliation mismatch: %+v", *row)
+	}
+
+	var totalPayments int
+	if err := db.QueryRow(`
+        SELECT COALESCE(SUM(amount),0)
+        FROM customer_payments
+        WHERE sale_id=$1
+          AND NOT EXISTS (
+              SELECT 1 FROM customer_payment_reversals
+              WHERE payment_id=customer_payments.id
+          )
+    `, sale.ID).Scan(&totalPayments); err != nil {
+		t.Fatal(err)
+	}
+	if totalPayments != 6000 {
+		t.Fatalf("Owner payments=%d want=6000", totalPayments)
+	}
+
+	if err := db.QueryRow(`
+        SELECT COALESCE(SUM(balance),0)
+        FROM financial_accounts
+        WHERE account_type='staff_cash' AND user_id=$1
+    `, cashierID).Scan(&cashBalance); err != nil {
+		t.Fatal(err)
+	}
+	if cashBalance != 2000 {
+		t.Fatalf("Card collections incorrectly affected cash: %d", cashBalance)
+	}
+
+	csvReport := adminRequest("GET", reportPath+"&format=csv", "", 200)
+	if got := csvReport.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/csv") {
+		t.Fatalf("CSV report content type=%q", got)
+	}
+	csvText := csvReport.Body.String()
+	if !strings.Contains(csvText, "credit_sales") ||
+		!strings.Contains(csvText, "cash_collections") ||
+		!strings.Contains(csvText, "card_collections") {
+		t.Fatalf("CSV report missing financial columns: %s", csvText)
+	}
 
 }
