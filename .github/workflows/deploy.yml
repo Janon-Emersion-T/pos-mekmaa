@@ -64,6 +64,13 @@ jobs:
       - name: Download Go dependencies
         run: go mod download
 
+      - name: Initialize PostgreSQL test database
+        env:
+          CI_DATABASE_INIT: "1"
+          BOOTSTRAP_ADMIN_EMAIL: ci-admin@example.invalid
+          BOOTSTRAP_ADMIN_PASSWORD: "CI-test-only@1234"
+        run: go test ./... -run '^TestCIInitializeDatabase$' -count=1 -v
+
       - name: Run Go tests
         run: go test ./...
 
@@ -120,9 +127,8 @@ jobs:
           npm ci
           npm run css
 
-          echo "Testing and building the application..."
+          echo "Building the application after successful CI..."
           go mod download
-          go test ./...
           rm -f "$NEW_BINARY"
           go build -trimpath -o "$NEW_BINARY" .
           test -s "$NEW_BINARY"
