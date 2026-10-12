@@ -1235,6 +1235,8 @@ func (s *Server) routes() http.Handler {
 	s.customerRoutes(private)
 	s.controlRoutes(private)
 	s.ownerControlRoutes(private)
+	private.Handle("GET /api/guest-refreshments", requireRoles(s.guestRefreshments, "superadmin", "admin"))
+	private.Handle("POST /api/guest-refreshments", requireRoles(s.guestRefreshments, "superadmin"))
 	private.Handle("GET /api/settings", requireRoles(s.settings, "superadmin", "admin", "cashier"))
 	private.Handle("PUT /api/settings", requireRoles(s.updateSettings, "superadmin", "admin"))
 	private.Handle("GET /api/categories", requireRoles(s.categories, "superadmin", "admin", "cashier"))
@@ -1263,7 +1265,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
-	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers"} {
+	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers", "/guest-refreshments"} {
 		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, sub, "index.html")
 		})

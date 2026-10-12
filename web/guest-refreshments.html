@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Guest Refreshments · Mekmaa POS</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body class="min-h-screen bg-gray-50 text-gray-800">
+<main class="mx-auto max-w-6xl p-4 sm:p-8">
+  <a href="/pos" class="text-sm text-orange-600">← Back to POS</a>
+  <h1 class="mt-5 text-2xl font-bold">Owner-sponsored guest refreshments</h1>
+  <p class="mt-2 text-sm text-gray-500">Complimentary hospitality. Reduces stock and records cost; no sale or cash movement.</p>
+  <div id="notice" role="status" class="my-4 text-sm"></div>
+  <form id="guest-form" class="grid gap-4 rounded-xl bg-white p-5 shadow-sm sm:grid-cols-2">
+    <label class="text-sm">Product
+      <select name="productId" required class="mt-2 block w-full rounded-lg border p-3"></select>
+    </label>
+    <label class="text-sm">Quantity
+      <input name="quantity" type="number" min="1" max="1000" value="1" required class="mt-2 block w-full rounded-lg border p-3">
+    </label>
+    <label class="text-sm">Guest / group
+      <input name="guestName" maxlength="150" required class="mt-2 block w-full rounded-lg border p-3">
+    </label>
+    <label class="text-sm">Reason / occasion
+      <input name="reason" maxlength="500" required class="mt-2 block w-full rounded-lg border p-3">
+    </label>
+    <button class="rounded-lg bg-orange-600 px-5 py-3 font-medium text-white sm:col-span-2">Record complimentary refreshments</button>
+  </form>
+  <h2 class="mb-3 mt-8 text-lg font-semibold">Recent hospitality records</h2>
+  <div class="overflow-x-auto rounded-xl bg-white shadow-sm">
+    <table class="w-full text-left text-sm">
+      <thead><tr class="border-b"><th class="p-3">Date</th><th class="p-3">Guest</th><th class="p-3">Product</th><th class="p-3">Qty</th><th class="p-3">Cost</th><th class="p-3">Reason</th><th class="p-3">Recorded by</th></tr></thead>
+      <tbody id="history"></tbody>
+    </table>
+  </div>
+</main>
+<script src="/guest-refreshments.js"></script>
+</body>
+</html>
