@@ -88,7 +88,7 @@ func TestCustomersAndCreditSales(t *testing.T) {
 	}
 	assignOpening := func(amount int) {
 		t.Helper()
-		if _, err := db.Exec(`INSERT INTO register_cash_allocations(user_id,amount,currency,assigned_by,assigned_by_email,note) VALUES($1,$2,(SELECT currency FROM store_settings WHERE id=1),$1,'cashier@example.test','test allocation')`, userID, amount); err != nil {
+		if _, err := db.Exec(`INSERT INTO register_cash_allocations(user_id,amount,currency,assigned_by,assigned_by_email,note) VALUES($1,$2,(SELECT currency FROM store_settings WHERE id=1),$1,'cashier@example.test','test allocation') ON CONFLICT(user_id) WHERE status='pending' DO UPDATE SET amount=EXCLUDED.amount,currency=EXCLUDED.currency,note=EXCLUDED.note`, userID, amount); err != nil {
 			t.Fatal(err)
 		}
 	}

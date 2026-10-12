@@ -173,7 +173,7 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	request("DELETE", path, "", 200)
 	request("PUT", path, strings.ReplaceAll(body, `"stock":8`, `"stock":0`), 404)
 	request("POST", "/api/checkout", fmt.Sprintf(`{"requestId":"product-deleted-checkout","items":[{"productId":%d,"quantity":1}],"payment":"cash","cashReceived":12550}`, created.ID), 400)
-	request("POST", "/api/purchases", fmt.Sprintf(`{"supplier":"Test","items":[{"productId":%d,"quantity":1,"unitCost":100}]}`, created.ID), 400)
+	request("POST", "/api/purchases", fmt.Sprintf(`{"requestId":"product-deleted-purchase","supplier":"Test","items":[{"productId":%d,"quantity":1,"unitCost":100}]}`, created.ID), 400)
 	request("POST", "/api/inventory/adjustments", fmt.Sprintf(`{"productId":%d,"quantity":1,"note":"test"}`, created.ID), 404)
 	var savedSales []Sale
 	if err := json.Unmarshal(request("GET", "/api/sales", "", 200).Body.Bytes(), &savedSales); err != nil {

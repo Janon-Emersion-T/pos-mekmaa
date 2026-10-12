@@ -176,7 +176,7 @@ func TestSessionAttributionAndConcurrentClose(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			closeResult = call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d}`, id))
+			closeResult = call(s.sessions, cashier, "POST", "/api/session/close", fmt.Sprintf(`{"closingCash":1450,"sessionId":%d,"expectedCash":1450}`, id))
 		}()
 		close(start)
 		wg.Wait()
