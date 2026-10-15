@@ -1484,6 +1484,7 @@ func (s *Server) routes() http.Handler {
 	s.customerRoutes(private)
 	s.controlRoutes(private)
 	s.ownerControlRoutes(private)
+	s.cashHandoverRoutes(private)
 	s.capitalRoutes(private)
 	s.purchasePaymentRoutes(private)
 	private.Handle("GET /api/guest-refreshments", requireRoles(s.guestRefreshments, "superadmin", "admin"))

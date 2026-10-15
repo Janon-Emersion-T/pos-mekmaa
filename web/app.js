@@ -79,6 +79,8 @@ let products = [],
   capitalEntries = [],
   registerReconciliations = [],
   carryForwardOptions = [],
+  cashHandoverAccount = {balance:0,currency:"",transfers:[]},
+  cashHandoverReviews = [],
   users = [],
   session = null,
   sessionHistory = [],
@@ -435,6 +437,7 @@ function renderOther() {
       ["Session", "Opened by", "Opened", "Closed by", "Closed", "Status", "Sales", "Sales total", "Expected at close", "Counted cash", "Difference"],
       sessionHistory.map((x) => `<tr class="border-b"><td class="p-4"><a href="/sales?sessionId=${x.id}" data-page="sales" class="text-orange-600">#${x.id}</a></td><td class="p-4">${escapeHTML(x.openedByEmail)}</td><td class="p-4">${new Date(x.openedAt).toLocaleString()}</td><td class="p-4">${x.closedAt ? escapeHTML(x.closedByEmail) : "—"}</td><td class="p-4">${x.closedAt ? new Date(x.closedAt).toLocaleString() : "—"}</td><td class="p-4 capitalize">${x.status}</td><td class="p-4">${x.saleCount}</td><td class="p-4">${money(x.salesTotal, x.currency)}</td><td class="p-4">${x.closingExpectedCash == null ? (x.closedAt ? "Not recorded" : "—") : money(x.closingExpectedCash, x.currency)}</td><td class="p-4">${x.closingCash == null ? "—" : money(x.closingCash, x.currency)}</td><td class="p-4">${x.closingExpectedCash == null || x.closingCash == null ? "—" : money(x.closingCash - x.closingExpectedCash, x.currency)}</td></tr>`).join("")
     );
+    if (currentUser?.role !== "superadmin") body += cashHandoverView();
   } else if (page === "inventory") {
     title = "Inventory";
     desc = "Current stock, daily adjustments, and an audit trail. No expiry or batch tracking.";
@@ -559,6 +562,13 @@ async function loadPage() {
       capitalEntries = currentUser?.role === "superadmin"
         ? await api("/api/capital")
         : [];
+      if (currentUser?.role === "superadmin") {
+        cashHandoverReviews = await api("/api/cash-handovers/review");
+        cashHandoverAccount = {balance:0,currency:"",transfers:[]};
+      } else {
+        cashHandoverAccount = await api("/api/cash-handovers");
+        cashHandoverReviews = [];
+      }
       if (request !== pageRequest) return;
     }
     if (requestedPage === "inventory") movements = records;
@@ -801,7 +811,7 @@ $("#other-page").addEventListener("submit", async (e) => {
   const f = e.target,
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
-  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","capital-contribution","database-reset","reconciliation-review"].includes(kind)) return;
+  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","capital-contribution","database-reset","reconciliation-review","cash-handover-review"].includes(kind)) return;
   if (f.dataset.saving) return;
   f.dataset.saving = "true";
   const submit = f.querySelector('button:not([type="button"])');
@@ -898,6 +908,13 @@ $("#other-page").addEventListener("submit", async (e) => {
         body: JSON.stringify({ closingCash: minorUnits(data.closingCash), sessionId: Number(f.dataset.sessionId), expectedCash: session.expectedCash, closingReason: data.closingReason }),
       });
       toast(`Session closed · difference ${money(result.difference)}`);
+    }
+    if (kind === "cash-handover") {
+      const amount = minorUnits(data.amount);
+      if (amount <= 0 || amount > cashHandoverAccount.balance) throw new Error("Enter a positive amount within your accountable cash balance.");
+      if (!confirm(`Request a cash handover of ${money(amount,cashHandoverAccount.currency || settings.currency)}? Your balance will change only after Superadmin approval.`)) return;
+      await api("/api/cash-handovers", jsonRequest({requestId:crypto.randomUUID(),amount,remarks:(data.remarks||"").trim()}));
+      toast("Cash handover request submitted");
     }
     if (kind === "petty") await durableWrite("petty", "/api/petty-cash", {direction:data.direction,amount:minorUnits(data.amount),category:data.category,note:data.note,sessionId:session?.id});
     if (kind === "purchase") await durableWrite("purchase", "/api/purchases", {supplier:data.supplier,invoiceNumber:data.invoiceNumber,items:[{productId:Number(data.productId),quantity:Number(data.quantity),unitCost:minorUnits(data.unitCost)}]});

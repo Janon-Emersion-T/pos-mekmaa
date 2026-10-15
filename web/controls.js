@@ -26,6 +26,33 @@ function assignedCashNotice() {
   return `<p class="mb-4 rounded-lg bg-green-50 p-3 text-xs text-green-700">Assigned opening cash: <strong>${money(assigned.amount,assigned.currency)}</strong>. Enter the exact same amount to start.</p>`;
 }
 
+function handoverStatus(x) {
+  return escapeHTML((x.status || "pending").replaceAll("_", " "));
+}
+
+function cashHandoverView() {
+  const transfers = cashHandoverAccount.transfers || [];
+  const pending = transfers.filter(x => x.status === "pending");
+  const completed = transfers.filter(x => x.status !== "pending");
+  const currency = cashHandoverAccount.currency || settings.currency;
+  const rows = items => table(
+    ["Requested", "Requested amount", "Approved / rejected", "Status", "Remarks", "Reviewed"],
+    items.map(x => `<tr class="border-b"><td class="p-4">${new Date(x.createdAt).toLocaleString()}</td><td class="p-4 font-semibold">${money(x.requestedAmount,x.currency)}</td><td class="p-4">${x.approvedAmount == null ? "—" : money(x.approvedAmount,x.currency)}</td><td class="p-4 capitalize">${handoverStatus(x)}</td><td class="p-4">${escapeHTML(x.remarks||"—")}${x.decisionRemarks ? `<div class="mt-1 text-xs text-gray-500">Review: ${escapeHTML(x.decisionRemarks)}</div>` : ""}</td><td class="p-4">${x.reviewedAt ? `${new Date(x.reviewedAt).toLocaleString()}<div class="text-xs text-gray-500">${escapeHTML(x.reviewerEmail)}</div>` : "—"}</td></tr>`).join("")
+  );
+  return `<section class="mt-8" aria-labelledby="cash-handover-title">
+    <h2 id="cash-handover-title" class="mb-3 font-semibold">Transfer Cash to Superadmin</h2>
+    <div class="mb-4 rounded-xl border bg-white p-5"><p class="text-xs text-gray-500">Current accountable cash balance</p><p class="mt-2 text-2xl font-semibold">${money(cashHandoverAccount.balance||0,currency)}</p><p class="mt-2 text-xs text-gray-500">Pending requests do not reduce this balance. Cash moves only after approval.</p></div>
+    <form data-form="cash-handover" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-2">${amountField("Transfer amount","amount")}<label class="text-xs">Remarks (optional)<input name="remarks" maxlength="500" class="mt-2 h-11 w-full rounded-lg border px-3" placeholder="End of shift cash"></label><button class="rounded-lg bg-accent px-5 py-3 text-sm text-white sm:col-span-2">Submit transfer request</button></form>
+    <h3 class="mb-3 font-semibold">Pending transfer requests</h3>${rows(pending)}
+    <h3 class="mb-3 mt-7 font-semibold">Completed transfer history</h3>${rows(completed)}
+  </section>`;
+}
+
+function cashHandoverReviewView() {
+  const rows = cashHandoverReviews.map(x => `<tr class="border-b align-top"><td class="p-4"><strong>${escapeHTML(x.cashierEmail)}</strong><div class="text-xs text-gray-500">${new Date(x.createdAt).toLocaleString()}</div></td><td class="p-4"><strong>${money(x.requestedAmount,x.currency)}</strong><div class="text-xs text-gray-500">${escapeHTML(x.remarks||"No remarks")}</div></td><td class="p-4 capitalize">${handoverStatus(x)}${x.approvedAmount != null ? `<div class="text-xs">Approved ${money(x.approvedAmount,x.currency)}</div>` : ""}${x.reviewerEmail ? `<div class="text-xs text-gray-500">${escapeHTML(x.reviewerEmail)} · ${x.reviewedAt ? new Date(x.reviewedAt).toLocaleString() : ""}</div>` : ""}${x.decisionRemarks ? `<div class="text-xs text-gray-500">${escapeHTML(x.decisionRemarks)}</div>` : ""}</td><td class="p-4">${x.status === "pending" ? `<form data-form="cash-handover-review" data-handover-id="${x.id}" data-requested="${x.requestedAmount}" data-currency="${escapeHTML(x.currency)}" class="grid min-w-56 gap-2"><input name="approvedAmount" inputmode="decimal" value="${(x.requestedAmount/100).toFixed(2)}" class="h-10 rounded-lg border px-3" aria-label="Approved amount"><input name="remarks" maxlength="500" placeholder="Review remarks" class="h-10 rounded-lg border px-3"><div class="flex flex-wrap gap-2"><button name="action" value="full" class="rounded-lg bg-ink px-3 py-2 text-xs text-white">Approve full</button><button name="action" value="partial" class="rounded-lg border px-3 py-2 text-xs">Approve partial</button><button name="action" value="reject" class="rounded-lg border border-red-300 px-3 py-2 text-xs text-red-600">Reject</button></div></form>` : "—"}</td></tr>`).join("");
+  return `<h2 class="mb-3 mt-7 font-semibold">Cash Handover Requests</h2>${table(["Cashier / requested", "Amount / cashier remarks", "Status / review", "Action"], rows)}`;
+}
+
 let pendingCapital = null;
 
 function capitalPendingKey() {
@@ -96,6 +123,7 @@ function adminSessionControls() {
          </button>
        </div>`
     : ""}
+    ${cashHandoverReviewView()}
     <h2 class="mb-3 mt-7 font-semibold">Record capital contribution</h2>
     <form data-form="capital-contribution" class="mb-4 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-3">
       <p class="text-xs leading-5 text-gray-600 sm:col-span-3">Only record genuine new business funds. Do not re-enter cash already recorded in a register, bank account, or financial ledger.</p>
@@ -622,7 +650,7 @@ $("#pos-collection-form").addEventListener("submit", submitPosCollection);
 
 $("#other-page").addEventListener("submit", async e => {
   const form = e.target, kind = form.dataset.form;
-  if (!["inventory-filter","capital-contribution","cash-allocation","database-reset","credit-policy","opening-correction","payment-reversal","admin-close","reconciliation-review"].includes(kind)) return;
+  if (!["inventory-filter","capital-contribution","cash-allocation","database-reset","credit-policy","opening-correction","payment-reversal","admin-close","reconciliation-review","cash-handover-review"].includes(kind)) return;
   e.preventDefault();
   if (form.dataset.saving) return;
   const data = Object.fromEntries(new FormData(form));
@@ -739,6 +767,16 @@ $("#other-page").addEventListener("submit", async e => {
             ? "Reconciliation verification voided"
             : "Reconciliation rejected"
       );
+    } else if (kind === "cash-handover-review") {
+      const action = e.submitter?.value || data.action;
+      const requested = Number(form.dataset.requested);
+      const approvedAmount = action === "reject" ? 0 : action === "full" ? requested : minorUnits(data.approvedAmount);
+      if (action === "partial" && (approvedAmount <= 0 || approvedAmount >= requested)) throw new Error("Partial approval must be greater than zero and less than the requested amount.");
+      const verb = action === "reject" ? "Reject" : action === "full" ? "Approve" : "Partially approve";
+      if (!confirm(`${verb} this ${money(requested,form.dataset.currency)} cash handover${action === "partial" ? ` for ${money(approvedAmount,form.dataset.currency)}` : ""}?`)) return;
+      await api(`/api/cash-handovers/${form.dataset.handoverId}/review`, jsonRequest({action:action === "reject" ? "reject" : "approve",approvedAmount,remarks:(data.remarks||"").trim()}));
+      await loadPage();
+      toast(action === "reject" ? "Cash handover rejected" : "Cash handover approved");
     }
   } catch (error) { toast(error.message); }
   finally { delete form.dataset.saving; if (submit) submit.disabled = false; }

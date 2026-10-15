@@ -34,7 +34,7 @@ async function setup(t, options = {}) {
     requests.push({path:pathname,method:request.method(),body:request.postDataJSON()});
     if (options.handle && await options.handle(route, pathname)) return;
     const responses = {
-      '/api/auth/me':{id:1,email:'test@example.test',role:'superadmin',mustChangePassword:options.mustChangePassword || false},
+      '/api/auth/me':{id:1,email:'test@example.test',role:options.role || 'superadmin',mustChangePassword:options.mustChangePassword || false},
       '/api/settings':{currency:'LKR',currencies:[{code:'LKR',name:'Sri Lankan Rupee'}]},
       '/api/optimized-debts/capacity':{
         enabled:false,
@@ -53,6 +53,8 @@ async function setup(t, options = {}) {
       '/api/register-cash-allocations':[],
       '/api/register-cash-reconciliations':[],
       '/api/register-cash-carry-forward-options':[],
+      '/api/cash-handovers/review':options.cashHandoverReviews || [],
+      '/api/cash-handovers':options.cashHandoverAccount || {balance:100000,currency:'LKR',transfers:[]},
       '/api/financial/funding-sources':[
         {
           id:10,
@@ -100,6 +102,39 @@ test('menu starts and every management page renders without missing functions', 
     }
   }
   assert.deepEqual(errors, []);
+});
+test('superadmin reviews a partial cash handover with confirmation', async t => {
+  const handover = {id:7,cashierId:2,cashierEmail:'cashier@example.test',currency:'LKR',requestedAmount:80000,approvedAmount:null,status:'pending',remarks:'Shift cash',reviewerEmail:'',decisionRemarks:'',sessionId:4,createdAt:'2026-09-25T09:00:00Z',reviewedAt:null};
+  const {page,errors,requests} = await setup(t,{cashHandoverReviews:[handover],handle:async(route,pathname) => {
+    if (pathname !== '/api/cash-handovers/7/review') return false;
+    await route.fulfill({json:{ok:true}});
+    return true;
+  }});
+  await ready(page,'/session');
+  await page.getByRole('heading',{name:'Cash Handover Requests'}).waitFor();
+  await page.locator('[data-form="cash-handover-review"] [name="approvedAmount"]').fill('600.00');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('[data-form="cash-handover-review"] button[value="partial"]').click();
+  await page.waitForFunction(() => performance.getEntriesByType('resource').some(x => x.name.includes('/api/cash-handovers/7/review')));
+  const request = requests.find(r=>r.path==='/api/cash-handovers/7/review');
+  assert.deepEqual(request.body,{action:'approve',approvedAmount:60000,remarks:''});
+  assert.deepEqual(errors,[]);
+});
+test('cashier renders accountable cash and submits a handover request', async t => {
+  const {page,errors,requests} = await setup(t,{role:'cashier',handle:async(route,pathname) => {
+    if (pathname !== '/api/cash-handovers' || route.request().method() !== 'POST') return false;
+    await route.fulfill({status:201,json:{id:9,status:'pending'}});
+    return true;
+  }});
+  await ready(page,'/session');
+  await page.getByRole('heading',{name:'Transfer Cash to Superadmin'}).waitFor();
+  await page.locator('[data-form="cash-handover"] [name="amount"]').fill('500.00');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('[data-form="cash-handover"] button').click();
+  const request = requests.find(r=>r.path==='/api/cash-handovers' && r.method==='POST');
+  assert.equal(request.body.amount,50000);
+  assert.match(request.body.requestId,/^[a-zA-Z0-9_-]{16,100}$/);
+  assert.deepEqual(errors,[]);
 });
 test('new catalogs render an empty menu', async t => {
   const {page,errors} = await setup(t,{empty:true});
