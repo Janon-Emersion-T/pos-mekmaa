@@ -116,7 +116,7 @@ func TestCapitalCrossAccountConcurrencyPostgres(t *testing.T) {
 
 	// Total owner investment: 10,000.
 	deposit := fmt.Sprintf(
-		`{"entryType":"contribution","amount":10000,"fundingAccountId":%d}`,
+		`{"requestId":"capital-capital_cross_account_test-0001","entryType":"contribution","amount":10000,"fundingAccountId":%d}`,
 		bankID,
 	)
 
@@ -163,8 +163,8 @@ func TestCapitalCrossAccountConcurrencyPostgres(t *testing.T) {
 			defer wg.Done()
 
 			body := fmt.Sprintf(
-				`{"entryType":"withdrawal","amount":7000,"fundingAccountId":%d}`,
-				id,
+				`{"requestId":"capital-cross-withdraw-%d","entryType":"withdrawal","amount":7000,"fundingAccountId":%d}`,
+				id, id,
 			)
 
 			statuses <- call(body).Code

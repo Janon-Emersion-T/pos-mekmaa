@@ -104,6 +104,7 @@ func lockCapitalBalance(ctx context.Context, tx *sql.Tx, currency string) (int64
 
 func (s *Server) createCapital(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		RequestID        string `json:"requestId"`
 		EntryType        string `json:"entryType"`
 		Amount           int64  `json:"amount"`
 		FundingAccountID *int64 `json:"fundingAccountId"`
@@ -111,6 +112,12 @@ func (s *Server) createCapital(w http.ResponseWriter, r *http.Request) {
 		Notes            string `json:"notes"`
 	}
 	if !decode(w, r, &req) {
+		return
+	}
+
+	req.RequestID = strings.TrimSpace(req.RequestID)
+	if !requestIDPattern.MatchString(req.RequestID) {
+		problem(w, 400, "A valid unique requestId is required")
 		return
 	}
 
@@ -153,6 +160,21 @@ func (s *Server) createCapital(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not load currency")
 		return
 	}
+	replay, requestHash, err := requestReplay(
+		r.Context(), tx, req.RequestID,
+		"capital-create", principal(r).ID, req,
+	)
+	if err != nil {
+		problem(w, 409, err.Error())
+		return
+	}
+	if replay != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(replay)
+		return
+	}
+
 	capitalBalance, err := lockCapitalBalance(r.Context(), tx, currency)
 	if err != nil {
 		problem(w, 500, "Could not calculate remaining capital")
@@ -240,6 +262,16 @@ func (s *Server) createCapital(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, "Could not post capital movement")
 			return
 		}
+	}
+
+	result := map[string]any{"id": id}
+	if err := saveRequest(
+		r.Context(), tx, req.RequestID,
+		"capital-create", requestHash,
+		principal(r).ID, result,
+	); err != nil {
+		problem(w, 500, "Could not save capital request")
+		return
 	}
 
 	if err := tx.Commit(); err != nil {

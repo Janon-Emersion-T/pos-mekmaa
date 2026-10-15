@@ -49,6 +49,7 @@ async function setup(t, options = {}) {
       '/api/products':options.empty ? [] : [product], '/api/categories':[{id:1,name:'Drinks',productCount:1}],
       '/api/session':register, '/api/sessions':[], '/api/sales':[sale], '/api/sales/1':sale,
       '/api/inventory/movements':[], '/api/purchases':[], '/api/petty-cash':[], '/api/users':[],
+      '/api/capital':[],
       '/api/register-cash-allocations':[],
       '/api/register-cash-reconciliations':[],
       '/api/register-cash-carry-forward-options':[],
@@ -859,4 +860,215 @@ test('POS collection dialog fits a mobile viewport', async t => {
   assert.ok(box.height <= 667);
   assert.ok(box.x >= 0);
   assert.deepEqual(errors,[]);
+});
+
+test('superadmin can view capital funding form and history', async t => {
+  const {page,errors} = await setup(t);
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+  await page.locator('[data-form="capital-contribution"]').waitFor();
+
+  const form = page.locator('[data-form="capital-contribution"]');
+  assert.equal(await form.locator('[name="fundingAccountId"] option').count(), 3);
+  assert.match(await page.locator('#other-page').innerText(), /Recent capital transactions/);
+  assert.deepEqual(errors, []);
+});
+
+test('capital contribution posts minor units and selected account', async t => {
+  const {page,errors,requests} = await setup(t, {
+    handle: async (route, pathname) => {
+      if (pathname !== '/api/capital' || route.request().method() !== 'POST') return false;
+      await route.fulfill({status:201,json:{id:123}});
+      return true;
+    }
+  });
+
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const form = page.locator('[data-form="capital-contribution"]');
+  await form.waitFor();
+
+  await form.locator('[name="fundingAccountId"]').selectOption('10');
+  await form.locator('[name="amount"]').fill('1500.25');
+  await form.locator('[name="reference"]').fill('CAP-TEST-001');
+  await form.locator('[name="notes"]').fill('New cash introduced by owner');
+  await form.locator('[name="confirmed"]').check();
+
+  page.once('dialog', dialog => dialog.accept());
+
+  const [capitalRequest] = await Promise.all([
+    page.waitForRequest(request =>
+      new URL(request.url()).pathname === '/api/capital' &&
+      request.method() === 'POST'
+    ),
+    form.locator('button').click()
+  ]);
+
+  assert.equal(capitalRequest.method(), 'POST');
+
+  const posted = requests.filter(r =>
+    r.path === '/api/capital' && r.method === 'POST'
+  );
+
+  assert.equal(posted.length, 1);
+  assert.match(posted[0].body.requestId, /^[a-zA-Z0-9_-]{16,100}$/);
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(posted[0].body).filter(([key]) => key !== 'requestId')
+    ),
+    {
+      entryType:'contribution',
+      amount:150025,
+      fundingAccountId:10,
+      reference:'CAP-TEST-001',
+      notes:'New cash introduced by owner'
+    }
+  );
+  assert.deepEqual(errors, []);
+});
+
+test('cancelled capital confirmation does not post funds', async t => {
+  const {page,requests} = await setup(t);
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const form = page.locator('[data-form="capital-contribution"]');
+  await form.waitFor();
+
+  await form.locator('[name="fundingAccountId"]').selectOption('10');
+  await form.locator('[name="amount"]').fill('100.00');
+  await form.locator('[name="reference"]').fill('CANCEL-TEST');
+  await form.locator('[name="notes"]').fill('Testing cancellation');
+  await form.locator('[name="confirmed"]').check();
+
+  page.once('dialog', dialog => dialog.dismiss());
+  await form.locator('button').click();
+
+  assert.equal(
+    requests.filter(r => r.path === '/api/capital' && r.method === 'POST').length,
+    0
+  );
+});
+
+test('capital contribution rejects zero amounts', async t => {
+  const {page,requests} = await setup(t);
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const form = page.locator('[data-form="capital-contribution"]');
+  await form.waitFor();
+
+  await form.locator('[name="fundingAccountId"]').selectOption('10');
+  await form.locator('[name="amount"]').fill('0.00');
+  await form.locator('[name="reference"]').fill('INVALID-TEST');
+  await form.locator('[name="notes"]').fill('Testing invalid amount');
+  await form.locator('[name="confirmed"]').check();
+
+  await form.locator('button').click();
+
+  assert.equal(
+    requests.filter(r => r.path === '/api/capital' && r.method === 'POST').length,
+    0
+  );
+});
+
+test('capital contribution refuses submission when recovery storage is unavailable', async t => {
+  const {page,requests} = await setup(t);
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const form = page.locator('[data-form="capital-contribution"]');
+  await form.waitFor();
+
+  await form.locator('[name="fundingAccountId"]').selectOption('10');
+  await form.locator('[name="amount"]').fill('250.00');
+  await form.locator('[name="reference"]').fill('STORAGE-FAIL-TEST');
+  await form.locator('[name="notes"]').fill('Testing unavailable recovery storage');
+  await form.locator('[name="confirmed"]').check();
+
+  await page.evaluate(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      if (key.startsWith('counter.pending-capital.')) {
+        throw new DOMException('Storage unavailable', 'QuotaExceededError');
+      }
+      return original.call(this, key, value);
+    };
+  });
+
+  page.once('dialog', dialog => dialog.accept());
+  await form.locator('button').click();
+
+  await page.waitForFunction(() =>
+    document.querySelector('#toast')?.textContent.includes(
+      'Cannot safely save the capital recovery request'
+    )
+  );
+
+  assert.equal(
+    requests.filter(r => r.path === '/api/capital' && r.method === 'POST').length,
+    0
+  );
+});
+
+test('capital contribution recovers a lost response without changing request ID', async t => {
+  let attempts = 0;
+  const {page,errors,requests} = await setup(t, {
+    handle: async (route, pathname) => {
+      if (pathname !== '/api/capital' || route.request().method() !== 'POST') return false;
+      attempts++;
+      if (attempts === 1) {
+        await route.abort('failed');
+      } else {
+        await route.fulfill({status:200,json:{id:456}});
+      }
+      return true;
+    }
+  });
+
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const form = page.locator('[data-form="capital-contribution"]');
+  await form.waitFor();
+
+  await form.locator('[name="fundingAccountId"]').selectOption('10');
+  await form.locator('[name="amount"]').fill('125.50');
+  await form.locator('[name="reference"]').fill('RECOVERY-TEST');
+  await form.locator('[name="notes"]').fill('Testing capital recovery');
+  await form.locator('[name="confirmed"]').check();
+
+  page.once('dialog', dialog => dialog.accept());
+  await form.locator('button').click();
+
+  await page.locator('[data-recover-capital]').waitFor();
+
+  const saved = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem('counter.pending-capital.1'))
+  );
+
+  assert.ok(saved);
+  assert.match(saved.requestId,/^[a-zA-Z0-9_-]{16,100}$/);
+
+  await page.reload();
+  await ready(page);
+  await page.evaluate(() => navigate('session'));
+
+  const recover = page.locator('[data-recover-capital]');
+  await recover.waitFor();
+  await recover.click();
+
+  await page.waitForFunction(() =>
+    localStorage.getItem('counter.pending-capital.1') === null
+  );
+
+  const posts = requests.filter(r =>
+    r.path === '/api/capital' && r.method === 'POST'
+  );
+
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts[0].body, posts[1].body);
+  assert.equal(posts[0].body.requestId, saved.requestId);
+  assert.deepEqual(errors, []);
 });

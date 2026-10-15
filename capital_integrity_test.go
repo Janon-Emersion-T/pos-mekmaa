@@ -134,7 +134,7 @@ func TestCapitalFinancialIntegrityPostgres(t *testing.T) {
 		}
 
 		body := fmt.Sprintf(
-			`{"entryType":"contribution","amount":10000,"fundingAccountId":%d,"notes":"FORCED-ROLLBACK"}`,
+			`{"requestId":"capital-capital_integrity_test-0001","entryType":"contribution","amount":10000,"fundingAccountId":%d,"notes":"FORCED-ROLLBACK"}`,
 			accountID,
 		)
 
@@ -169,7 +169,7 @@ func TestCapitalFinancialIntegrityPostgres(t *testing.T) {
 
 	t.Run("concurrent withdrawals cannot overdraw", func(t *testing.T) {
 		deposit := fmt.Sprintf(
-			`{"entryType":"contribution","amount":10000,"fundingAccountId":%d}`,
+			`{"requestId":"capital-capital_integrity_test-0002","entryType":"contribution","amount":10000,"fundingAccountId":%d}`,
 			accountID,
 		)
 
@@ -177,10 +177,12 @@ func TestCapitalFinancialIntegrityPostgres(t *testing.T) {
 			t.Fatalf("deposit failed: %d %s", w.Code, w.Body.String())
 		}
 
-		withdraw := fmt.Sprintf(
-			`{"entryType":"withdrawal","amount":7000,"fundingAccountId":%d}`,
-			accountID,
-		)
+		withdraw := func(worker int) string {
+			return fmt.Sprintf(
+				`{"requestId":"capital-integrity-withdraw-%04d","entryType":"withdrawal","amount":7000,"fundingAccountId":%d}`,
+				worker, accountID,
+			)
+		}
 
 		const workers = 2
 		statuses := make(chan int, workers)
@@ -188,10 +190,10 @@ func TestCapitalFinancialIntegrityPostgres(t *testing.T) {
 
 		for i := 0; i < workers; i++ {
 			wg.Add(1)
-			go func() {
+			go func(worker int) {
 				defer wg.Done()
-				statuses <- call(withdraw).Code
-			}()
+				statuses <- call(withdraw(worker)).Code
+			}(i)
 		}
 
 		wg.Wait()

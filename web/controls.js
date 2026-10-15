@@ -26,13 +26,107 @@ function assignedCashNotice() {
   return `<p class="mb-4 rounded-lg bg-green-50 p-3 text-xs text-green-700">Assigned opening cash: <strong>${money(assigned.amount,assigned.currency)}</strong>. Enter the exact same amount to start.</p>`;
 }
 
+let pendingCapital = null;
+
+function capitalPendingKey() {
+  return `counter.pending-capital.${currentUser.id}`;
+}
+
+function restorePendingCapital() {
+  try {
+    const stored = localStorage.getItem(capitalPendingKey());
+    if (!stored) {
+      pendingCapital = null;
+      return null;
+    }
+
+    const request = JSON.parse(stored);
+    if (!request || typeof request.requestId !== "string" ||
+        !/^[a-zA-Z0-9_-]{16,100}$/.test(request.requestId)) {
+      throw new Error("Invalid stored capital request");
+    }
+
+    pendingCapital = request;
+    return pendingCapital;
+  } catch {
+    // Never discard an in-memory request because storage is unavailable.
+    return pendingCapital;
+  }
+}
+
+function clearPendingCapital() {
+  pendingCapital = null;
+  try {
+    localStorage.removeItem(capitalPendingKey());
+  } catch {
+    // The server response is authoritative; storage cleanup is best effort.
+  }
+}
+
+async function sendPendingCapital() {
+  if (!pendingCapital) throw new Error("No pending capital request");
+
+  let result;
+  try {
+    result = await api("/api/capital", jsonRequest(pendingCapital));
+  } catch (error) {
+    if ([400, 403, 404, 409].includes(error.status)) {
+      clearPendingCapital();
+    }
+    throw error;
+  }
+
+  clearPendingCapital();
+  toast(`Capital contribution confirmed #${result.id}`);
+  await loadPage();
+}
+
 function adminSessionControls() {
   if (currentUser?.role !== "superadmin") return "";
+  restorePendingCapital();
   const staff = users.filter(u => u.active && u.id !== currentUser.id);
   const openSessions = sessionHistory.filter(x => x.status === "open");
   const carryForwardRows = carryForwardOptions.filter(r => r.currency === settings.currency && r.currentAvailableCash > 0);
   const reconciliationRows = registerReconciliations.slice(0, 25);
-  return `<h2 class="mb-3 mt-7 font-semibold">Assign opening cash</h2>
+  return `${pendingCapital
+    ? `<div class="mb-5 rounded-lg border border-orange-300 bg-orange-50 p-4 text-sm">
+         A capital transaction is awaiting confirmation. Do not record another contribution.
+         <button type="button" data-recover-capital class="ml-2 font-semibold text-orange-700">
+           Recover capital transaction
+         </button>
+       </div>`
+    : ""}
+    <h2 class="mb-3 mt-7 font-semibold">Record capital contribution</h2>
+    <form data-form="capital-contribution" class="mb-4 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-3">
+      <p class="text-xs leading-5 text-gray-600 sm:col-span-3">Only record genuine new business funds. Do not re-enter cash already recorded in a register, bank account, or financial ledger.</p>
+      <label class="text-xs">Destination account
+        <select name="fundingAccountId" required class="mt-2 h-11 w-full rounded-lg border px-3">
+          <option value="">Select an account</option>
+          ${fundingSources.filter(a=>a.currency===settings.currency).map(a=>`<option value="${a.id}">${escapeHTML({
+            central_cash:"Central cash",
+            investment_cash:"Investment cash",
+            bank:"Bank account"
+          }[a.accountType] || a.accountType)} · ${money(a.balance,a.currency)}</option>`).join("")}
+        </select>
+      </label>
+      ${amountField("Capital amount","amount","0.00")}
+      <label class="text-xs">Reference
+        <input name="reference" required maxlength="200" placeholder="Funding receipt or reference" class="mt-2 h-11 w-full rounded-lg border px-3">
+      </label>
+      <label class="text-xs sm:col-span-3">Explanation
+        <textarea name="notes" required maxlength="2000" rows="2" class="mt-2 w-full rounded-lg border p-3" placeholder="Where the money came from and why it is being introduced"></textarea>
+      </label>
+      <label class="flex items-start gap-2 text-xs sm:col-span-3">
+        <input type="checkbox" name="confirmed" required class="mt-0.5">
+        <span>I confirm this is genuine new capital and has not already been recorded.</span>
+      </label>
+      <button ${pendingCapital ? "disabled" : ""} class="h-11 rounded-lg bg-ink px-5 text-sm text-white disabled:opacity-50 sm:col-span-3">Record capital contribution</button>
+    </form>
+    <details class="mb-6 rounded-xl border bg-white p-4">
+      <summary class="cursor-pointer text-sm font-semibold">Recent capital transactions (${capitalEntries.length})</summary>
+      <div class="mt-4">${table(["ID","Type","Amount","Reference","Date"],capitalEntries.map(x=>`<tr class="border-b"><td class="p-3">#${x.id}</td><td class="p-3">${escapeHTML(x.entryType)}</td><td class="p-3">${money(x.amount,x.currency)}</td><td class="p-3">${escapeHTML(x.reference||"—")}</td><td class="p-3">${new Date(x.createdAt).toLocaleString()}</td></tr>`).join(""))}</div>
+    </details>
+    <h2 class="mb-3 mt-7 font-semibold">Assign opening cash</h2>
     <form data-form="cash-allocation" class="mb-6 grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-4">
       <label class="text-xs">Staff member<select name="userId" required class="mt-2 h-11 w-full rounded-lg border px-3">${staff.map(u=>`<option value="${u.id}">${escapeHTML(u.email)} · ${escapeHTML(u.role)}</option>`).join("")}</select></label>
       ${amountField("Opening cash", "amount", "0.00")}
@@ -45,7 +139,12 @@ function adminSessionControls() {
       <label class="text-xs sm:col-span-2">Funding source
         <select name="fundingAccountId" class="mt-2 h-11 w-full rounded-lg border px-3">
           <option value="">Select a funding account</option>
-          ${fundingSources.filter(a=>a.currency===settings.currency).map(a=>`<option value="${a.id}">${a.accountType==="central_cash"?"Central cash":"Superadmin cash"} · ${money(a.balance,a.currency)}</option>`).join("")}
+          ${fundingSources.filter(a=>a.currency===settings.currency).map(a=>`<option value="${a.id}">${escapeHTML({
+            central_cash: "Central cash",
+            investment_cash: "Investment cash",
+            bank: "Bank account",
+            superadmin_cash: "Superadmin cash"
+          }[a.accountType] || a.accountType)} · ${money(a.balance,a.currency)}</option>`).join("")}
         </select>
       </label>
       <label class="text-xs sm:col-span-2">Verified carry-forward
@@ -523,7 +622,7 @@ $("#pos-collection-form").addEventListener("submit", submitPosCollection);
 
 $("#other-page").addEventListener("submit", async e => {
   const form = e.target, kind = form.dataset.form;
-  if (!["inventory-filter","cash-allocation","database-reset","credit-policy","opening-correction","payment-reversal","admin-close","reconciliation-review"].includes(kind)) return;
+  if (!["inventory-filter","capital-contribution","cash-allocation","database-reset","credit-policy","opening-correction","payment-reversal","admin-close","reconciliation-review"].includes(kind)) return;
   e.preventDefault();
   if (form.dataset.saving) return;
   const data = Object.fromEntries(new FormData(form));
@@ -534,6 +633,41 @@ $("#other-page").addEventListener("submit", async e => {
     if (kind === "inventory-filter") {
       const params = new URLSearchParams(Object.entries(data).filter(([,value])=>value !== ""));
       await navigate("inventory", true, params.size ? "?"+params.toString() : "");
+    } else if (kind === "capital-contribution") {
+      if (currentUser?.role !== "superadmin") throw new Error("Superadmin access required.");
+      const amount = minorUnits(data.amount);
+      const fundingAccountId = Number(data.fundingAccountId);
+      if (amount <= 0 || !fundingSources.some(a => a.id === fundingAccountId && a.currency === settings.currency)) {
+        throw new Error("Enter a positive amount and select an eligible account.");
+      }
+      if (!data.reference?.trim() || !data.notes?.trim() || data.confirmed !== "on") {
+        throw new Error("Reference, explanation and confirmation are required.");
+      }
+      if (!window.confirm(`Record ${money(amount,settings.currency)} as NEW business capital? This changes the financial ledger. Do not retry if the response is uncertain.`)) return;
+      if (pendingCapital) throw new Error("Recover the pending capital transaction first.");
+
+      const request = {
+        requestId:crypto.randomUUID(),
+        entryType:"contribution",
+        amount,
+        fundingAccountId,
+        reference:data.reference.trim(),
+        notes:data.notes.trim()
+      };
+
+      try {
+        localStorage.setItem(capitalPendingKey(), JSON.stringify(request));
+      } catch {
+        throw new Error("Cannot safely save the capital recovery request in this browser. No capital was submitted.");
+      }
+      pendingCapital = request;
+
+      try {
+        await sendPendingCapital();
+      } catch (error) {
+        await loadPage();
+        throw error;
+      }
     } else if (kind === "cash-allocation") {
       const fundingType = data.fundingType;
       const fundingAccountId = fundingType === "new_funds"
@@ -609,5 +743,28 @@ document.addEventListener("click", async e => {
     $("#other-page").appendChild(wrapper);
     wrapper.requestSubmit();
     wrapper.remove();
+  }
+});
+
+
+// Recover an uncertain capital submission using its original request ID.
+document.addEventListener("click", async event => {
+  const button = event.target.closest("[data-recover-capital]");
+  if (!button || button.disabled) return;
+
+  button.disabled = true;
+
+  try {
+    restorePendingCapital();
+    await sendPendingCapital();
+  } catch (error) {
+    toast(
+      pendingCapital
+        ? "Capital confirmation remains uncertain. Retry recovery; do not create another contribution."
+        : error.message
+    );
+    if (!pendingCapital) await loadPage();
+  } finally {
+    button.disabled = false;
   }
 });

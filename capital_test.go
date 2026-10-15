@@ -104,7 +104,7 @@ func TestCapitalAPIPostgres(t *testing.T) {
 
 	t.Run("cashier forbidden", func(t *testing.T) {
 		w := call(cashier, "POST", "/api/capital",
-			`{"entryType":"contribution","amount":1000}`)
+			`{"requestId":"capital-capital_test-0001","entryType":"contribution","amount":1000}`)
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
 		}
@@ -112,7 +112,7 @@ func TestCapitalAPIPostgres(t *testing.T) {
 
 	t.Run("invalid amount", func(t *testing.T) {
 		w := call(admin, "POST", "/api/capital",
-			`{"entryType":"contribution","amount":0}`)
+			`{"requestId":"capital-capital_test-0002","entryType":"contribution","amount":0}`)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 		}
@@ -120,7 +120,7 @@ func TestCapitalAPIPostgres(t *testing.T) {
 
 	w := call(admin, "POST", "/api/capital",
 		fmt.Sprintf(
-			`{"entryType":"contribution","amount":50000,"fundingAccountId":%d,"reference":"TEST-CAPITAL"}`,
+			`{"requestId":"capital-capital_test-0003","entryType":"contribution","amount":50000,"fundingAccountId":%d,"reference":"TEST-CAPITAL"}`,
 			fundingAccountID,
 		))
 	if w.Code != http.StatusCreated {
@@ -193,7 +193,7 @@ func TestCapitalAPIPostgres(t *testing.T) {
 
 	t.Run("withdrawal exceeds account balance", func(t *testing.T) {
 		body := fmt.Sprintf(
-			`{"entryType":"withdrawal","amount":60000,"fundingAccountId":%d}`,
+			`{"requestId":"capital-capital_test-0004","entryType":"withdrawal","amount":60000,"fundingAccountId":%d}`,
 			fundingAccountID,
 		)
 		w := call(admin, "POST", "/api/capital", body)
@@ -204,7 +204,7 @@ func TestCapitalAPIPostgres(t *testing.T) {
 
 	t.Run("valid withdrawal", func(t *testing.T) {
 		body := fmt.Sprintf(
-			`{"entryType":"withdrawal","amount":10000,"fundingAccountId":%d}`,
+			`{"requestId":"capital-capital_test-0005","entryType":"withdrawal","amount":10000,"fundingAccountId":%d}`,
 			fundingAccountID,
 		)
 		w := call(admin, "POST", "/api/capital", body)
@@ -237,7 +237,7 @@ func TestCapitalAPIPostgres(t *testing.T) {
 
 	t.Run("reinvestment does not deposit cash", func(t *testing.T) {
 		w := call(admin, "POST", "/api/capital",
-			`{"entryType":"reinvestment","amount":5000}`)
+			`{"requestId":"capital-capital_test-0006","entryType":"reinvestment","amount":5000}`)
 		if w.Code != http.StatusCreated {
 			t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 		}
@@ -287,7 +287,7 @@ func TestCapitalAPIPostgres(t *testing.T) {
 
 	t.Run("restore sufficient funds", func(t *testing.T) {
 		body := fmt.Sprintf(
-			`{"entryType":"contribution","amount":10000,"fundingAccountId":%d,"reference":"TEST-RESTORE"}`,
+			`{"requestId":"capital-capital_test-0007","entryType":"contribution","amount":10000,"fundingAccountId":%d,"reference":"TEST-RESTORE"}`,
 			fundingAccountID,
 		)
 		w := call(admin, "POST", "/api/capital", body)

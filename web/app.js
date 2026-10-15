@@ -76,6 +76,7 @@ let products = [],
   movements = [],
   openingAllocations = [],
   fundingSources = [],
+  capitalEntries = [],
   registerReconciliations = [],
   carryForwardOptions = [],
   users = [],
@@ -553,7 +554,13 @@ async function loadPage() {
     if (requestedPage === "sales") sales = records;
     if (requestedPage === "reports") reportData = records;
     if (requestedPage === "audit") auditData = records;
-    if (requestedPage === "session") sessionHistory = records;
+    if (requestedPage === "session") {
+      sessionHistory = records;
+      capitalEntries = currentUser?.role === "superadmin"
+        ? await api("/api/capital")
+        : [];
+      if (request !== pageRequest) return;
+    }
     if (requestedPage === "inventory") movements = records;
     if (requestedPage === "purchases") purchases = records;
     if (requestedPage === "petty") petty = records;
@@ -794,7 +801,7 @@ $("#other-page").addEventListener("submit", async (e) => {
   const f = e.target,
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
-  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","database-reset","reconciliation-review"].includes(kind)) return;
+  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","capital-contribution","database-reset","reconciliation-review"].includes(kind)) return;
   if (f.dataset.saving) return;
   f.dataset.saving = "true";
   const submit = f.querySelector('button:not([type="button"])');
