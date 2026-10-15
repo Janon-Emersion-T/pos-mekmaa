@@ -574,3 +574,39 @@ test('owner account overview shows outstanding and settlement history', async t 
 
   assert.deepEqual(errors,[]);
 });
+
+
+test('POS debtors panel shows all outstanding customers and totals', async t => {
+  const customers = [
+    {id:1, name:'Alice', balances:[{currency:'LKR',outstanding:12000,overdue:2000}]},
+    {id:2, name:'Bob', balances:[{currency:'LKR',outstanding:5000,overdue:0}]},
+    {id:3, name:'Paid Customer', balances:[{currency:'LKR',outstanding:0,overdue:0}]},
+    {id:4, name:'Owner', isOwner:true, balances:[{currency:'LKR',outstanding:3000,overdue:0}]},
+    {id:5, name:'Charlie', balances:[{currency:'LKR',outstanding:8000,overdue:0}]},
+    {id:6, name:'Diana', balances:[{currency:'LKR',outstanding:7000,overdue:0}]},
+    {id:7, name:'Edward', balances:[{currency:'LKR',outstanding:6000,overdue:0}]},
+  ];
+
+  const {page,errors} = await setup(t,{customers});
+  await ready(page);
+
+  const panel = page.locator('#pos-debtors-panel');
+  await panel.waitFor({state:'visible'});
+
+  assert.match(await panel.innerText(), /Debtors \(6\)/);
+  assert.match(await panel.innerText(), /Total outstanding/i);
+  assert.match(await panel.innerText(), /410\.00/);
+  assert.match(await panel.innerText(), /Overdue/);
+  assert.match(await panel.innerText(), /Owner/);
+
+  for (const name of ['Alice','Bob','Charlie','Diana','Edward']) {
+    assert.match(await panel.innerText(), new RegExp(name));
+  }
+
+  assert.doesNotMatch(await panel.innerText(), /Paid Customer/);
+
+  const debtorLinks = panel.locator('a[href*="collect=1"]');
+  assert.equal(await debtorLinks.count(), 6);
+
+  assert.deepEqual(errors,[]);
+});
