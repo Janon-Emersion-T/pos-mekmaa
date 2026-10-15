@@ -11,6 +11,9 @@ The application uses Go, PostgreSQL, and Tailwind CSS.
 |---|---|
 | [Cashier Guide](CASHIER_GUIDE.md) | Daily register operation, checkout, collections and closing |
 | [Inventory and Purchases](INVENTORY_AND_PURCHASES.md) | Products, categories, stock and purchases |
+| [Customer Credit and Debts](CUSTOMER_CREDIT_AND_DEBTS.md) | Customers, credit sales, opening debts and collections |
+| [Sales and Returns](SALES_AND_RETURNS.md) | Checkout, receipts, refunds and corrections |
+| [Cash Sessions and Transfers](CASH_SESSIONS_AND_TRANSFERS.md) | Register cash, petty cash and reconciliation |
 
 ## Existing technical documentation
 
