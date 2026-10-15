@@ -14,6 +14,9 @@ The application uses Go, PostgreSQL, and Tailwind CSS.
 | [Customer Credit and Debts](CUSTOMER_CREDIT_AND_DEBTS.md) | Customers, credit sales, opening debts and collections |
 | [Sales and Returns](SALES_AND_RETURNS.md) | Checkout, receipts, refunds and corrections |
 | [Cash Sessions and Transfers](CASH_SESSIONS_AND_TRANSFERS.md) | Register cash, petty cash and reconciliation |
+| [Superadmin Guide](SUPERADMIN_GUIDE.md) | Staff administration, cash allocation and restricted controls |
+| [Finance and Capital](FINANCE_AND_CAPITAL.md) | Capital, financial accounts, purchase payments and drawings |
+| [Optimized Debts](OPTIMIZED_DEBTS.md) | Inventory-margin credit capacity and safety rules |
 
 ## Existing technical documentation
 
