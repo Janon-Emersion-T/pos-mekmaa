@@ -27,6 +27,7 @@ func getOrCreateFinancialAccount(
 	if accountType != "staff_cash" &&
 		accountType != "superadmin_cash" &&
 		accountType != "central_cash" &&
+		accountType != "investment_cash" &&
 		accountType != "bank" {
 		return a, errors.New("invalid financial account type")
 	}

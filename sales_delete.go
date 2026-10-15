@@ -81,38 +81,152 @@ func (s *Server) deleteSale(w http.ResponseWriter, r *http.Request) {
 		problem(w, 409, "This sale has already been deleted")
 		return
 	}
-	rows, err := tx.QueryContext(r.Context(), `SELECT product_id,SUM(quantity) FROM sale_items WHERE sale_id=$1 AND product_id IS NOT NULL GROUP BY product_id ORDER BY product_id`, id)
+	rows, err := tx.QueryContext(
+		r.Context(),
+		`SELECT
+			product_id,
+			SUM(quantity)::BIGINT,
+			CASE
+				WHEN COUNT(*) = COUNT(total_cost_snapshot)
+				THEN SUM(total_cost_snapshot)
+				ELSE NULL
+			END
+		 FROM sale_items
+		 WHERE sale_id=$1 AND product_id IS NOT NULL
+		 GROUP BY product_id
+		 ORDER BY product_id`,
+		id,
+	)
+
 	if err != nil {
-		problem(w, 500, "Could not restore stock")
+		problem(w, 500, "Could not load sale inventory valuation")
 		return
 	}
-	type item struct{ id, quantity int64 }
+
+	type item struct {
+		productID int64
+		quantity  int64
+		cost      sql.NullInt64
+	}
+
 	var items []item
+
 	for rows.Next() {
 		var x item
-		if err = rows.Scan(&x.id, &x.quantity); err != nil {
+
+		if err = rows.Scan(
+			&x.productID,
+			&x.quantity,
+			&x.cost,
+		); err != nil {
 			rows.Close()
-			problem(w, 500, "Could not read sale items")
+			problem(w, 500, "Could not read historical sale costs")
 			return
 		}
+
 		items = append(items, x)
 	}
+
 	err = rows.Err()
 	rows.Close()
+
 	if err != nil {
 		problem(w, 500, "Could not read sale items")
 		return
 	}
+
+	var currency string
+
+	err = tx.QueryRowContext(
+		r.Context(),
+		`SELECT currency FROM sales WHERE id=$1`,
+		id,
+	).Scan(&currency)
+
+	if err != nil {
+		problem(w, 500, "Could not read sale currency")
+		return
+	}
+
 	for _, x := range items {
-		_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock+$1 WHERE id=$2`, x.quantity, x.id)
-		if err == nil {
-			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,reference_type,reference_id,note,created_by) VALUES($1,'adjustment',$2,'sale_deletion',$3,$4,$5)`, x.id, x.quantity, id, "Sale deleted: "+req.Reason, principal(r).ID)
-		}
+		var stock int64
+		var balance sql.NullInt64
+
+		err = tx.QueryRowContext(
+			r.Context(),
+			`SELECT stock,inventory_cost_balance
+			 FROM products WHERE id=$1 FOR UPDATE`,
+			x.productID,
+		).Scan(&stock, &balance)
+
 		if err != nil {
-			problem(w, 500, "Could not restore stock")
+			problem(w, 500, "Could not lock sale product")
+			return
+		}
+
+		var updatedBalance any
+		var restoredValue any
+
+		if x.cost.Valid && balance.Valid {
+			if x.cost.Int64 > int64(^uint64(0)>>1)-balance.Int64 {
+				problem(w, 409, "Sale reversal exceeds supported valuation range")
+				return
+			}
+
+			updatedBalance = balance.Int64 + x.cost.Int64
+			restoredValue = x.cost.Int64
+		}
+
+		_, err = tx.ExecContext(
+			r.Context(),
+			`UPDATE products
+			 SET stock=stock+$1,inventory_cost_balance=$2
+			 WHERE id=$3`,
+			x.quantity,
+			updatedBalance,
+			x.productID,
+		)
+
+		if err == nil {
+			_, err = tx.ExecContext(
+				r.Context(),
+				`INSERT INTO inventory_movements(
+					product_id,kind,quantity,reference_type,
+					reference_id,note,created_by
+				) VALUES($1,'adjustment',$2,'sale_deletion',$3,$4,$5)`,
+				x.productID,
+				x.quantity,
+				id,
+				"Sale deleted: "+req.Reason,
+				principal(r).ID,
+			)
+		}
+
+		if err == nil {
+			_, err = tx.ExecContext(
+				r.Context(),
+				`INSERT INTO inventory_valuation_entries(
+					product_id,quantity_change,value_change,
+					currency,movement_type,reference_type,
+					reference_id,notes,created_by
+				) VALUES($1,$2,$3,$4,'sale_reversal',
+					'sale_deletion',$5,$6,$7)`,
+				x.productID,
+				x.quantity,
+				restoredValue,
+				currency,
+				id,
+				req.Reason,
+				principal(r).ID,
+			)
+		}
+
+		if err != nil {
+			problem(w, 500, "Could not restore sale inventory valuation")
 			return
 		}
 	}
+
 	_, err = tx.ExecContext(r.Context(), `UPDATE sales SET deleted_at=now(),deleted_by=$1,deletion_reason=$2 WHERE id=$3`, principal(r).ID, req.Reason, id)
 	if err != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not delete sale")

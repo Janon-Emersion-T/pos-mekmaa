@@ -17,13 +17,13 @@ func (s *Server) financialFundingSources(
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id,user_id,account_type,currency,balance
 		FROM financial_accounts
-		WHERE account_type='central_cash'
-		   OR (
-				account_type='superadmin_cash'
-				AND user_id=$1
-		   )
+		WHERE account_type IN (
+            'investment_cash',
+            'central_cash',
+            'bank'
+        )
 		ORDER BY currency,account_type,id
-	`, actor.ID)
+	`)
 	if err != nil {
 		problem(w, 500, "Could not load funding sources")
 		return

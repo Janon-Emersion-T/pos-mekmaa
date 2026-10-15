@@ -283,6 +283,71 @@ function productManagement() {
   ${table(["Product","Category","Price","Cost","Stock","Actions"], products.map((p) => `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(p.name)}</td><td class="p-4">${escapeHTML(p.category)}</td><td class="p-4">${money(p.price)}</td><td class="p-4">${money(p.cost)}</td><td class="p-4">${p.stock}</td><td class="p-4"><button data-edit-product="${p.id}" class="mr-3 text-orange-600">Edit</button><button data-delete-product="${p.id}" class="text-red-600">Delete</button></td></tr>`).join(""))}
   <p class="mt-3 text-xs text-gray-500">Deleted products are removed from the catalog. Past sales, purchases, and stock records are kept.</p>`;
 }
+
+async function refreshOptimizedDebtsPanel() {
+  const panel = document.querySelector("#optimized-debts-panel");
+  if (!panel || currentUser?.role !== "superadmin") return;
+
+  try {
+    const data = await api("/api/optimized-debts/capacity");
+
+    if (!panel.isConnected) return;
+
+    const blocked = data.unverifiedItems > 0;
+
+    panel.innerHTML = `
+      <h2 class="text-lg font-semibold">Optimized Debts</h2>
+      <p class="mt-2 text-sm text-gray-500">
+        Control credit sales using a provisional inventory-margin ceiling.
+        This is not realized profit or available cash.
+      </p>
+
+      <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div class="rounded-lg border p-3">
+          <p class="text-xs text-gray-500">Potential inventory margin</p>
+          <p class="mt-1 font-semibold">${money(data.verifiedMargin)}</p>
+        </div>
+        <div class="rounded-lg border p-3">
+          <p class="text-xs text-gray-500">Existing non-owner debt</p>
+          <p class="mt-1 font-semibold">${money(data.outstandingDebt)}</p>
+        </div>
+        <div class="rounded-lg border p-3">
+          <p class="text-xs text-gray-500">Available credit headroom</p>
+          <p class="mt-1 font-semibold">${money(data.availableCredit)}</p>
+        </div>
+      </div>
+
+      ${blocked ? `
+        <p class="mt-3 text-sm text-red-600">
+          ${Number(data.unverifiedItems)} stocked product(s) have
+          unverified inventory costs. New optimized credit is blocked.
+        </p>` : ""}
+
+      <form data-form="optimized-debts"
+            class="mt-5 flex flex-wrap items-center gap-4">
+        <label class="flex items-center gap-2 text-sm font-medium">
+          <input type="checkbox" name="enabled"
+                 ${data.enabled ? "checked" : ""}>
+          Enable Optimized Debts
+        </label>
+        <button class="rounded-lg bg-accent px-5 py-3 text-sm text-white
+                       disabled:opacity-50">
+          Save credit policy
+        </button>
+      </form>
+
+      <p class="mt-3 text-xs text-gray-500">
+        This policy applies to non-owner credit checkouts.
+        Existing customer credit limits remain in effect.
+      </p>
+    `;
+  } catch (error) {
+    if (panel.isConnected) {
+      panel.textContent = "Unable to load Optimized Debts capacity.";
+    }
+  }
+}
+
 function renderOther() {
   if (page === "pos") return;
   let title = "",
@@ -485,6 +550,14 @@ async function loadPage() {
     renderProducts();
     renderCart();
     renderOther();
+    if (page === "settings" && currentUser?.role === "superadmin") {
+      const container = document.querySelector("#other-page");
+      if (container && !container.querySelector("#optimized-debts-panel")) {
+        container.insertAdjacentHTML("beforeend",
+          '<section id="optimized-debts-panel" class="mt-5 max-w-4xl rounded-xl border bg-white p-5">Loading Optimized Debts…</section>');
+      }
+      refreshOptimizedDebtsPanel();
+    }
   } catch (e) {
     if (request !== pageRequest) return;
     toast(e.message);
@@ -751,6 +824,32 @@ $("#other-page").addEventListener("submit", async (e) => {
       toast(f.dataset.id ? "Product updated" : "Product added");
       return;
     }
+
+    if (kind === "optimized-debts") {
+      if (currentUser?.role !== "superadmin") {
+        throw new Error("Superadmin access required");
+      }
+
+      const button = f.querySelector("button");
+      button.disabled = true;
+
+      try {
+        await api("/api/settings/optimized-debts", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: f.querySelector('[name="enabled"]').checked
+          }),
+        });
+
+        toast("Optimized Debts setting saved");
+        await refreshOptimizedDebtsPanel();
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+
     if (kind === "settings") {
       const button = f.querySelector("button");
       button.disabled = true;

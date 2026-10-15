@@ -88,13 +88,42 @@ func (s *Server) refundSale(w http.ResponseWriter, r *http.Request) {
 		product          sql.NullInt64
 		quantity, amount int
 		restock          bool
+		historicalCost   sql.NullInt64
 	}
 	var lines []returned
 	total := 0
 	for _, x := range req.Items {
 		var product sql.NullInt64
 		var quantity, price, refunded int
-		err = tx.QueryRowContext(r.Context(), `SELECT product_id,quantity,unit_price,COALESCE((SELECT SUM(quantity) FROM refund_items WHERE sale_item_id=i.id),0) FROM sale_items i WHERE id=$1 AND sale_id=$2`, x.SaleItemID, saleID).Scan(&product, &quantity, &price, &refunded)
+		var originalCost sql.NullInt64
+		var previouslyAllocated sql.NullInt64
+
+		err = tx.QueryRowContext(
+			r.Context(),
+			`SELECT i.product_id,i.quantity,i.unit_price,
+			        i.total_cost_snapshot,
+			        COALESCE((
+			            SELECT SUM(ri.quantity)
+			            FROM refund_items ri
+			            WHERE ri.sale_item_id=i.id
+			        ),0),
+			        (
+			            SELECT SUM(ri.historical_cost_allocated)
+			            FROM refund_items ri
+			            WHERE ri.sale_item_id=i.id
+			        )
+			 FROM sale_items i
+			 WHERE i.id=$1 AND i.sale_id=$2`,
+			x.SaleItemID,
+			saleID,
+		).Scan(
+			&product,
+			&quantity,
+			&price,
+			&originalCost,
+			&refunded,
+			&previouslyAllocated,
+		)
 		if err != nil || x.Quantity > quantity-refunded {
 			problem(w, 409, "Return quantity exceeds the remaining quantity for this sale")
 			return
@@ -103,9 +132,49 @@ func (s *Server) refundSale(w http.ResponseWriter, r *http.Request) {
 			problem(w, 409, "This item can no longer be restocked")
 			return
 		}
+		var allocatedCost sql.NullInt64
+
+		if originalCost.Valid {
+			if refunded > 0 && !previouslyAllocated.Valid {
+				problem(w, 409, "Historical refund costs require reconciliation")
+				return
+			}
+
+			previousCost := int64(0)
+			if previouslyAllocated.Valid {
+				previousCost = previouslyAllocated.Int64
+			}
+
+			cost, costErr := proportionalRefundCost(
+				int64(quantity),
+				originalCost.Int64,
+				int64(refunded),
+				previousCost,
+				int64(x.Quantity),
+			)
+
+			if costErr != nil {
+				problem(w, 409, "Could not allocate historical refund cost")
+				return
+			}
+
+			allocatedCost = sql.NullInt64{
+				Int64: cost,
+				Valid: true,
+			}
+		}
+
 		amount := price * x.Quantity
 		total += amount
-		lines = append(lines, returned{x.SaleItemID, product, x.Quantity, amount, x.Restock})
+
+		lines = append(lines, returned{
+			x.SaleItemID,
+			product,
+			x.Quantity,
+			amount,
+			x.Restock,
+			allocatedCost,
+		})
 	}
 	var id int64
 	var cashReturned, cardReturned, debtReduction int
@@ -132,15 +201,102 @@ func (s *Server) refundSale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, x := range lines {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO refund_items(refund_id,sale_item_id,quantity,restock,amount) VALUES($1,$2,$3,$4,$5)`, id, x.id, x.quantity, x.restock, x.amount)
-		if err == nil && x.restock {
-			_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock+$1 WHERE id=$2`, x.quantity, x.product.Int64)
-			if err == nil {
-				_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,reference_type,reference_id,note,created_by) VALUES($1,'adjustment',$2,'refund',$3,$4,$5)`, x.product.Int64, x.quantity, id, req.Reason, principal(r).ID)
-			}
-		}
+		_, err = tx.ExecContext(
+			r.Context(),
+			`INSERT INTO refund_items(
+				refund_id,sale_item_id,quantity,restock,
+				amount,historical_cost_allocated
+			) VALUES($1,$2,$3,$4,$5,$6)`,
+			id,
+			x.id,
+			x.quantity,
+			x.restock,
+			x.amount,
+			x.historicalCost,
+		)
+
 		if err != nil {
-			problem(w, 500, "Could not record returned items")
+			problem(w, 500, "Could not record refunded item cost")
+			return
+		}
+
+		if !x.restock {
+			continue
+		}
+
+		var stock int64
+		var balance sql.NullInt64
+
+		err = tx.QueryRowContext(
+			r.Context(),
+			`SELECT stock,inventory_cost_balance
+			 FROM products WHERE id=$1 FOR UPDATE`,
+			x.product.Int64,
+		).Scan(&stock, &balance)
+
+		if err != nil {
+			problem(w, 500, "Could not lock returned product")
+			return
+		}
+
+		var updatedBalance any
+		var restoredValue any
+
+		if x.historicalCost.Valid && balance.Valid {
+			if balance.Int64 > int64(^uint64(0)>>1)-x.historicalCost.Int64 {
+				problem(w, 409, "Refund inventory valuation exceeds supported range")
+				return
+			}
+
+			updatedBalance = balance.Int64 + x.historicalCost.Int64
+			restoredValue = x.historicalCost.Int64
+		}
+
+		_, err = tx.ExecContext(
+			r.Context(),
+			`UPDATE products
+			 SET stock=stock+$1,inventory_cost_balance=$2
+			 WHERE id=$3`,
+			x.quantity,
+			updatedBalance,
+			x.product.Int64,
+		)
+
+		if err == nil {
+			_, err = tx.ExecContext(
+				r.Context(),
+				`INSERT INTO inventory_movements(
+					product_id,kind,quantity,reference_type,
+					reference_id,note,created_by
+				) VALUES($1,'adjustment',$2,'refund',$3,$4,$5)`,
+				x.product.Int64,
+				x.quantity,
+				id,
+				req.Reason,
+				principal(r).ID,
+			)
+		}
+
+		if err == nil {
+			_, err = tx.ExecContext(
+				r.Context(),
+				`INSERT INTO inventory_valuation_entries(
+					product_id,quantity_change,value_change,
+					currency,movement_type,reference_type,
+					reference_id,notes,created_by
+				) VALUES($1,$2,$3,$4,'refund','refund',$5,$6,$7)`,
+				x.product.Int64,
+				x.quantity,
+				restoredValue,
+				currency,
+				id,
+				req.Reason,
+				principal(r).ID,
+			)
+		}
+
+		if err != nil {
+			problem(w, 500, "Could not restore refunded inventory valuation")
 			return
 		}
 	}

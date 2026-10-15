@@ -9,6 +9,10 @@ import (
 )
 
 var financialCashEntryTypes = map[string]bool{
+	"capital_contribution":     true,
+	"capital_withdrawal":       true,
+	"capital_correction":       true,
+	"stock_purchase_payment":   true,
 	"cash_sale":                true,
 	"cash_collection":          true,
 	"cash_collection_reversal": true,

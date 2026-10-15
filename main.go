@@ -160,6 +160,10 @@ func openDB(ctx context.Context, url string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("create superadmin: %w", err)
 	}
+	if err = ensureInvestmentCashAccount(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize investment cash: %w", err)
+	}
 	return db, nil
 }
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -267,8 +271,9 @@ var supportedCurrencies = []Currency{
 }
 
 type Settings struct {
-	Currency   string     `json:"currency"`
-	Currencies []Currency `json:"currencies"`
+	Currency              string     `json:"currency"`
+	Currencies            []Currency `json:"currencies"`
+	OptimizedDebtsEnabled bool       `json:"optimizedDebtsEnabled"`
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -277,7 +282,18 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not load settings")
 		return
 	}
-	respond(w, 200, Settings{currency, supportedCurrencies})
+	var enabled bool
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT optimized_debts_enabled FROM store_settings WHERE id=1`,
+	).Scan(&enabled); err != nil {
+		problem(w, 500, "Could not load Optimized Debts setting")
+		return
+	}
+	respond(w, 200, Settings{
+		Currency:              currency,
+		Currencies:            supportedCurrencies,
+		OptimizedDebtsEnabled: enabled,
+	})
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +342,18 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not save settings")
 		return
 	}
-	respond(w, 200, Settings{req.Currency, supportedCurrencies})
+	var optimizedEnabled bool
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT optimized_debts_enabled FROM store_settings WHERE id=1`,
+	).Scan(&optimizedEnabled); err != nil {
+		problem(w, 500, "Could not load Optimized Debts setting")
+		return
+	}
+	respond(w, 200, Settings{
+		Currency:              req.Currency,
+		Currencies:            supportedCurrencies,
+		OptimizedDebtsEnabled: optimizedEnabled,
+	})
 }
 
 func (s *Server) products(w http.ResponseWriter, r *http.Request) {
@@ -446,8 +473,11 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	total := 0
 	type item struct {
 		Line
-		Name  string
-		Price int
+		Name           string
+		Price          int
+		CostSnapshot   *int64
+		TotalCost      *int64
+		NewCostBalance *int64
 	}
 	items := []item{}
 	for _, line := range req.Items {
@@ -458,13 +488,28 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		var x item
 		x.Line = line
 		var stock int
-		if err = tx.QueryRowContext(r.Context(), `SELECT name,CASE WHEN $2 THEN cost ELSE price END,stock FROM products WHERE id=$1 AND active FOR UPDATE`, line.ProductID, ownerCheckout).Scan(&x.Name, &x.Price, &stock); err != nil {
+		var costBalance sql.NullInt64
+		if err = tx.QueryRowContext(r.Context(), `SELECT name,CASE WHEN $2 THEN cost ELSE price END,stock,inventory_cost_balance FROM products WHERE id=$1 AND active FOR UPDATE`, line.ProductID, ownerCheckout).Scan(&x.Name, &x.Price, &stock, &costBalance); err != nil {
 			problem(w, 400, "Product not found")
 			return
 		}
 		if stock < line.Quantity {
 			problem(w, 409, x.Name+" has insufficient stock")
 			return
+		}
+		if costBalance.Valid {
+			issueValue, costErr := weightedAverageIssueValue(
+				int64(stock), costBalance.Int64, int64(line.Quantity),
+			)
+			if costErr != nil {
+				problem(w, 409, "Inventory valuation requires reconciliation")
+				return
+			}
+			remaining := costBalance.Int64 - issueValue
+			unitCost := issueValue / int64(line.Quantity)
+			x.TotalCost = &issueValue
+			x.CostSnapshot = &unitCost
+			x.NewCostBalance = &remaining
 		}
 		total += x.Price * line.Quantity
 		items = append(items, x)
@@ -489,6 +534,38 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "Cash received applies only to cash sales")
 		return
 	}
+	if req.Payment == "credit" && !ownerCheckout {
+		var optimizedEnabled bool
+		err = tx.QueryRowContext(r.Context(), `
+            SELECT optimized_debts_enabled
+            FROM store_settings
+            WHERE id=1
+            FOR UPDATE
+        `).Scan(&optimizedEnabled)
+
+		if err != nil {
+			problem(w, 500, "Could not verify Optimized Debts settings")
+			return
+		}
+
+		if optimizedEnabled {
+			capacity, capacityErr := optimizedDebtCapacity(
+				r.Context(), tx, session.Currency,
+			)
+			if capacityErr != nil {
+				problem(w, 500, "Could not calculate Optimized Debts capacity")
+				return
+			}
+
+			requestedCredit := int64(total - req.InitialPayment)
+			if requestedCredit > capacity.AvailableCredit {
+				problem(w, 409,
+					"This sale exceeds available Optimized Debts capacity")
+				return
+			}
+		}
+	}
+
 	var dueDate string
 	if req.Payment == "credit" {
 		dueDate = req.DueDate
@@ -523,15 +600,33 @@ func (s *Server) checkout(w http.ResponseWriter, r *http.Request) {
 	}
 	names := []string{}
 	for _, x := range items {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO sale_items(sale_id,product_id,product_name,quantity,unit_price) VALUES($1,$2,$3,$4,$5)`, id, x.ProductID, x.Name, x.Quantity, x.Price)
+		_, err = tx.ExecContext(r.Context(), `INSERT INTO sale_items(sale_id,product_id,product_name,quantity,unit_price,unit_cost_snapshot,total_cost_snapshot,cost_method) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+			id, x.ProductID, x.Name, x.Quantity, x.Price,
+			x.CostSnapshot, x.TotalCost,
+			func() any {
+				if x.TotalCost != nil {
+					return "weighted_average"
+				}
+				return nil
+			}(),
+		)
 		if err == nil {
-			_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock-$1 WHERE id=$2`, x.Quantity, x.ProductID)
+			_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock-$1,inventory_cost_balance=$2 WHERE id=$3`,
+				x.Quantity, x.NewCostBalance, x.ProductID)
 		}
 		if err == nil {
 			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,reference_type,reference_id,note,created_by) VALUES($1,'sale',$2,'sale',$3,'POS sale',$4)`, x.ProductID, -x.Quantity, id, principal(r).ID)
 		}
+		if err == nil {
+			var valueChange any
+			if x.TotalCost != nil {
+				valueChange = -*x.TotalCost
+			}
+			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_valuation_entries(product_id,quantity_change,value_change,currency,movement_type,reference_type,reference_id,notes,created_by) VALUES($1,$2,$3,$4,'sale','sale',$5,'POS checkout',$6)`,
+				x.ProductID, -x.Quantity, valueChange, session.Currency, id, principal(r).ID)
+		}
 		if err != nil {
-			problem(w, 500, "Could not update inventory")
+			problem(w, 500, "Could not update inventory valuation")
 			return
 		}
 		names = append(names, fmt.Sprintf("%d × %s", x.Quantity, x.Name))
@@ -895,15 +990,52 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 			problem(w, 400, "Product is no longer available")
 			return
 		}
+		var existingStock int64
+		var existingBalance sql.NullInt64
+		if err = tx.QueryRowContext(r.Context(), `SELECT stock,inventory_cost_balance FROM products WHERE id=$1 FOR UPDATE`, x.ProductID).Scan(&existingStock, &existingBalance); err != nil {
+			problem(w, 500, "Could not read purchase inventory valuation")
+			return
+		}
+		var newBalance any
+		var purchaseValue any
+		if existingBalance.Valid || existingStock == 0 {
+			starting := int64(0)
+			if existingBalance.Valid {
+				starting = existingBalance.Int64
+			}
+			updated, costErr := inventoryPurchaseValue(starting, int64(x.Quantity), int64(x.UnitCost))
+			if costErr != nil {
+				problem(w, 409, "Purchase inventory valuation overflow")
+				return
+			}
+			cost, costErr := inventoryPurchaseCost(
+				int64(x.Quantity), int64(x.UnitCost),
+			)
+			if costErr != nil {
+				problem(w, 409, "Purchase cost exceeds supported monetary range")
+				return
+			}
+			newBalance = updated
+			purchaseValue = cost
+		}
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO purchase_items(purchase_id,product_id,quantity,unit_cost) VALUES($1,$2,$3,$4)`, id, x.ProductID, x.Quantity, x.UnitCost)
 		if err == nil {
-			_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock+$1,cost=$2 WHERE id=$3`, x.Quantity, x.UnitCost, x.ProductID)
+			_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock+$1,cost=$2,inventory_cost_balance=$3 WHERE id=$4`,
+				x.Quantity, x.UnitCost, newBalance, x.ProductID)
 		}
 		if err == nil {
 			_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,reference_type,reference_id,note,created_by) VALUES($1,'purchase',$2,'purchase',$3,'Stock received',$4)`, x.ProductID, x.Quantity, id, principal(r).ID)
 		}
+		if err == nil {
+			var purchaseCurrency string
+			err = tx.QueryRowContext(r.Context(), `SELECT currency FROM purchases WHERE id=$1`, id).Scan(&purchaseCurrency)
+			if err == nil {
+				_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_valuation_entries(product_id,quantity_change,value_change,currency,movement_type,reference_type,reference_id,notes,created_by) VALUES($1,$2,$3,$4,'purchase','purchase',$5,'Stock purchase',$6)`,
+					x.ProductID, x.Quantity, purchaseValue, purchaseCurrency, id, principal(r).ID)
+			}
+		}
 		if err != nil {
-			problem(w, 400, "Invalid purchase product")
+			problem(w, 400, "Invalid purchase product or valuation")
 			return
 		}
 	}
@@ -958,23 +1090,130 @@ func (s *Server) inventory(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not record actor")
 		return
 	}
-	var stock int
-	if err = tx.QueryRowContext(r.Context(), `SELECT stock FROM products WHERE id=$1 AND active FOR UPDATE`, req.ProductID).Scan(&stock); err != nil {
+	var stock int64
+	var balance sql.NullInt64
+
+	err = tx.QueryRowContext(
+		r.Context(),
+		`SELECT stock,inventory_cost_balance
+		 FROM products
+		 WHERE id=$1 AND active
+		 FOR UPDATE`,
+		req.ProductID,
+	).Scan(&stock, &balance)
+
+	if err != nil {
 		problem(w, 404, "Product not found")
 		return
 	}
-	if stock+req.Quantity < 0 {
-		problem(w, 409, "Adjustment would make stock negative")
+
+	newStock := stock + int64(req.Quantity)
+
+	if newStock < 0 || newStock > 1000000 {
+		problem(w, 409, "Adjustment exceeds allowed stock limits")
 		return
 	}
-	_, err = tx.ExecContext(r.Context(), `UPDATE products SET stock=stock+$1 WHERE id=$2`, req.Quantity, req.ProductID)
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO inventory_movements(product_id,kind,quantity,note,created_by) VALUES($1,'adjustment',$2,$3,$4)`, req.ProductID, req.Quantity, req.Note, principal(r).ID)
+
+	var newBalance any
+	var valueChange any
+
+	if req.Quantity < 0 {
+		if balance.Valid {
+			removed, costErr := weightedAverageIssueValue(
+				stock,
+				balance.Int64,
+				-int64(req.Quantity),
+			)
+			if costErr != nil {
+				problem(w, 409, "Inventory valuation requires reconciliation")
+				return
+			}
+
+			newBalance = balance.Int64 - removed
+			valueChange = -removed
+		}
+	} else {
+		// Positive adjustments have no verified acquisition cost.
+		// Keep the new valuation unknown rather than inventing a cost.
+		newBalance = nil
+		valueChange = nil
 	}
-	if err != nil || tx.Commit() != nil {
-		problem(w, 500, "Could not adjust inventory")
+
+	_, err = tx.ExecContext(
+		r.Context(),
+		`UPDATE products
+		 SET stock=$1,inventory_cost_balance=$2
+		 WHERE id=$3`,
+		newStock,
+		newBalance,
+		req.ProductID,
+	)
+
+	if err != nil {
+		problem(w, 500, "Could not update stock valuation")
 		return
 	}
+
+	var movementID int64
+
+	err = tx.QueryRowContext(
+		r.Context(),
+		`INSERT INTO inventory_movements(
+			product_id,kind,quantity,note,created_by
+		 ) VALUES($1,'adjustment',$2,$3,$4)
+		 RETURNING id`,
+		req.ProductID,
+		req.Quantity,
+		req.Note,
+		principal(r).ID,
+	).Scan(&movementID)
+
+	if err != nil {
+		problem(w, 500, "Could not record stock movement")
+		return
+	}
+
+	var currency string
+
+	err = tx.QueryRowContext(
+		r.Context(),
+		`SELECT currency FROM store_settings WHERE id=1`,
+	).Scan(&currency)
+
+	if err != nil {
+		problem(w, 500, "Could not read inventory currency")
+		return
+	}
+
+	_, err = tx.ExecContext(
+		r.Context(),
+		`INSERT INTO inventory_valuation_entries(
+			product_id,quantity_change,value_change,
+			currency,movement_type,reference_type,
+			reference_id,notes,created_by
+		) VALUES(
+			$1,$2,$3,$4,'adjustment',
+			'inventory_movement',$5,$6,$7
+		)`,
+		req.ProductID,
+		req.Quantity,
+		valueChange,
+		currency,
+		movementID,
+		req.Note,
+		principal(r).ID,
+	)
+
+	if err != nil {
+		problem(w, 500, "Could not record inventory valuation")
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		problem(w, 500, "Could not commit inventory adjustment")
+		return
+	}
+
 	respond(w, 201, map[string]bool{"ok": true})
 }
 func tokenHash(token string) string {
@@ -1243,8 +1482,15 @@ func (s *Server) routes() http.Handler {
 	s.customerRoutes(private)
 	s.controlRoutes(private)
 	s.ownerControlRoutes(private)
+	s.capitalRoutes(private)
+	s.purchasePaymentRoutes(private)
 	private.Handle("GET /api/guest-refreshments", requireRoles(s.guestRefreshments, "superadmin", "admin"))
 	private.Handle("POST /api/guest-refreshments", requireRoles(s.guestRefreshments, "superadmin"))
+	private.Handle("PUT /api/settings/optimized-debts",
+		requireRoles(s.updateOptimizedDebts, "superadmin"))
+	private.Handle("GET /api/optimized-debts/capacity",
+		requireRoles(s.getOptimizedDebtCapacity, "superadmin"))
+
 	private.Handle("GET /api/settings", requireRoles(s.settings, "superadmin", "admin", "cashier"))
 	private.Handle("PUT /api/settings", requireRoles(s.updateSettings, "superadmin", "admin"))
 	private.Handle("GET /api/categories", requireRoles(s.categories, "superadmin", "admin", "cashier"))

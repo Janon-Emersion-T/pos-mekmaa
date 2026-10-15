@@ -154,10 +154,9 @@ func (s *Server) registerCashAllocations(w http.ResponseWriter, r *http.Request)
 		}
 		if sourceCurrency != currency ||
 			(sourceType != "central_cash" &&
-				sourceType != "superadmin_cash") ||
-			(sourceType == "superadmin_cash" &&
-				(!sourceOwner.Valid ||
-					sourceOwner.Int64 != principal(r).ID)) {
+				sourceType != "investment_cash" &&
+				sourceType != "bank") ||
+			sourceOwner.Valid {
 			problem(w, 400, "Invalid opening funding source")
 			return
 		}

@@ -86,6 +86,17 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Investment Cash already exists after database initialization.
+	if _, err := db.Exec(`
+        UPDATE financial_accounts
+        SET balance=7500
+        WHERE account_type='investment_cash'
+          AND currency=$1
+          AND user_id IS NULL
+    `, currency); err != nil {
+		t.Fatal(err)
+	}
+
 	for _, a := range []struct {
 		accountType string
 		owner       any
@@ -137,8 +148,8 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(accounts) != 2 {
-		t.Fatalf("expected 2 funding sources, got %d", len(accounts))
+	if len(accounts) != 3 {
+		t.Fatalf("expected 3 funding sources, got %d", len(accounts))
 	}
 
 	found := map[string]int64{}
@@ -147,7 +158,8 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 	}
 
 	if found["central_cash"] != 5000 ||
-		found["superadmin_cash"] != 2500 {
+		found["investment_cash"] != 7500 ||
+		found["bank"] != 10000 {
 		t.Fatalf("incorrect authorized accounts: %+v", found)
 	}
 

@@ -177,12 +177,12 @@ func postRegisterOpeningFunding(
 		}
 
 		if sourceType != "central_cash" &&
-			sourceType != "superadmin_cash" {
+			sourceType != "investment_cash" &&
+			sourceType != "bank" {
 			return errors.New("invalid opening funding source")
 		}
 
-		if sourceType == "superadmin_cash" &&
-			(!sourceOwner.Valid || sourceOwner.Int64 != assignedBy) {
+		if sourceOwner.Valid {
 			return errors.New("superadmin cash source owner mismatch")
 		}
 

@@ -42,12 +42,19 @@ func TestOpeningFundingSecurityPostgres(t *testing.T) {
 			wantError:   "insufficient",
 		},
 		{
-			name:        "invalid bank source",
+			name:        "valid bank source",
 			fundingType: "new_funds",
 			sourceType:  "bank",
 			balance:     5000,
 			amount:      1500,
-			wantError:   "invalid opening funding source",
+			wantError:   "",
+		},
+		{
+			name:        "valid investment cash source",
+			fundingType: "new_funds",
+			sourceType:  "investment_cash",
+			balance:     5000,
+			amount:      1500,
 		},
 		{
 			name:        "inactive administrator",
@@ -216,10 +223,14 @@ func TestOpeningFundingSecurityPostgres(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if balance != tc.balance {
+			expectedBalance := tc.balance
+			if tc.wantError == "" {
+				expectedBalance -= tc.amount
+			}
+			if balance != expectedBalance {
 				t.Fatalf(
-					"source balance changed: got %d, want %d",
-					balance, tc.balance,
+					"source balance: got %d, want %d",
+					balance, expectedBalance,
 				)
 			}
 
@@ -234,11 +245,40 @@ func TestOpeningFundingSecurityPostgres(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if ledgerCount != 0 {
+			expectedLedgerCount := 0
+			if tc.wantError == "" {
+				expectedLedgerCount = 2
+			}
+
+			if ledgerCount != expectedLedgerCount {
 				t.Fatalf(
-					"unexpected funding ledger entries: %d",
-					ledgerCount,
+					"funding ledger entries: got %d, want %d",
+					ledgerCount, expectedLedgerCount,
 				)
+			}
+
+			if tc.wantError == "" {
+				var entryCount int
+				var netAmount int64
+
+				err = tx.QueryRowContext(ctx, `
+                    SELECT COUNT(*), COALESCE(SUM(amount), 0)
+                    FROM financial_ledger_entries
+                    WHERE reference_type='register_cash_allocation'
+                      AND reference_id=$1
+                      AND entry_type IN ('transfer_in','transfer_out')
+                `, allocationID).Scan(&entryCount, &netAmount)
+
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if entryCount != 2 || netAmount != 0 {
+					t.Fatalf(
+						"unbalanced funding ledger: entries=%d net=%d",
+						entryCount, netAmount,
+					)
+				}
 			}
 		})
 	}
