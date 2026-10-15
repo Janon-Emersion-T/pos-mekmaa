@@ -2,6 +2,12 @@
 
 A café point-of-sale application built with Go, PostgreSQL, and compiled Tailwind CSS. It includes register sessions, petty cash, purchases, inventory movements and adjustments, stock-aware checkout, receipts, and sales history. Inventory is intentionally simple: there is no expiry-date or batch control.
 
+## Documentation
+
+- [Complete documentation index](docs/README.md)
+- [Cashier guide](docs/CASHIER_GUIDE.md)
+- [Inventory and purchases guide](docs/INVENTORY_AND_PURCHASES.md)
+
 ## Run
 
 Create a PostgreSQL database and user using your PostgreSQL administration method:
