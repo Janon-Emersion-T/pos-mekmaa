@@ -291,6 +291,16 @@ RESTART IDENTITY`); err != nil {
 		problem(w, 500, "Could not reset database")
 		return
 	}
+	// Restore the special Owner customer after clearing business data.
+	// Its new record has no opening balance, sales, payments or settlements.
+	if _, err = tx.ExecContext(r.Context(), `
+		INSERT INTO customers (name, notes, is_owner)
+		VALUES ('Owner', 'Owner account: cost-price credit checkout', true)
+	`); err != nil {
+		problem(w, 500, "Could not restore Owner account")
+		return
+	}
+
 	if _, err = tx.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE user_id<>$1`, principal(r).ID); err != nil || tx.Commit() != nil {
 		problem(w, 500, "Could not reset database")
 		return
