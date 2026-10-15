@@ -196,8 +196,8 @@ func (s *Server) reviewRegisterCashReconciliation(w http.ResponseWriter, r *http
 	}
 	req.Action = strings.TrimSpace(req.Action)
 	req.Remarks = strings.TrimSpace(req.Remarks)
-	if (req.Action != "verify" && req.Action != "reject") || len(req.Remarks) > 500 {
-		problem(w, 400, "Choose verify or reject with remarks of at most 500 characters")
+	if (req.Action != "verify" && req.Action != "reject" && req.Action != "void") || len(req.Remarks) > 500 {
+		problem(w, 400, "Choose verify, reject or void with remarks of at most 500 characters")
 		return
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
@@ -234,6 +234,52 @@ func (s *Server) reviewRegisterCashReconciliation(w http.ResponseWriter, r *http
 		problem(w, 500, "Could not read reconciliation")
 		return
 	}
+	if req.Action == "void" {
+		if status != "verified" {
+			problem(w, 409, "Only verified reconciliations can be voided")
+			return
+		}
+		if len(req.Remarks) < 10 {
+			problem(w, 400, "Provide a void reason of at least 10 characters")
+			return
+		}
+
+		var allocations int64
+		if err = tx.QueryRowContext(r.Context(), `
+			SELECT COUNT(*)
+			FROM register_cash_allocations
+			WHERE reconciliation_id=$1
+		`, id).Scan(&allocations); err != nil {
+			problem(w, 500, "Could not check carry-forward allocations")
+			return
+		}
+		if allocations != 0 {
+			problem(w, 409, "Cannot void reconciliation with linked carry-forward allocations")
+			return
+		}
+
+		_, err = tx.ExecContext(r.Context(), `
+			UPDATE register_cash_reconciliations
+			SET status='voided',
+			    verified_available_cash=NULL,
+			    verified_ledger_entry_id=NULL,
+			    voided_by=$2,
+			    voided_at=now(),
+			    void_reason=$3
+			WHERE id=$1 AND status='verified'
+		`, id, principal(r).ID, req.Remarks)
+		if err != nil {
+			problem(w, 500, "Could not void reconciliation")
+			return
+		}
+		if err = tx.Commit(); err != nil {
+			problem(w, 500, "Could not void reconciliation")
+			return
+		}
+		respond(w, 200, map[string]bool{"ok": true})
+		return
+	}
+
 	if status != "pending" {
 		problem(w, 409, "Reconciliation has already been reviewed")
 		return

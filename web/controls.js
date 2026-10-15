@@ -159,7 +159,7 @@ function adminSessionControls() {
     </form>
     ${table(["Staff","Amount","Source","Assigned by","Assigned"],openingAllocations.map(a=>`<tr class="border-b"><td class="p-4">${escapeHTML(a.userEmail)}</td><td class="p-4 font-semibold">${money(a.amount,a.currency)}</td><td class="p-4">${escapeHTML((a.fundingType||"legacy_unclassified").replaceAll("_"," "))}${a.reconciliationId?` · reconciliation #${a.reconciliationId}`:""}</td><td class="p-4">${escapeHTML(a.assignedByEmail)}</td><td class="p-4">${new Date(a.createdAt).toLocaleString()}</td></tr>`).join(""))}
     <h2 class="mb-3 mt-7 font-semibold">Register reconciliations</h2>
-    ${table(["Session","Staff","Count","Difference","Available","Status","Review"],reconciliationRows.map(r=>`<tr class="border-b"><td class="p-4">#${r.sessionId}</td><td class="p-4">${escapeHTML(r.userEmail)}</td><td class="p-4">${money(r.countedCash,r.currency)} of ${money(r.expectedCash,r.currency)}</td><td class="p-4 ${r.cashDifference<0?"text-red-600":"text-green-600"}">${money(r.cashDifference,r.currency)}</td><td class="p-4">${r.status==="verified"?money(r.currentAvailableCash,r.currency):"—"}</td><td class="p-4 capitalize">${escapeHTML(r.status)}</td><td class="p-4">${r.status==="pending"?`<form data-form="reconciliation-review" data-reconciliation-id="${r.id}" class="grid gap-2"><input name="remarks" maxlength="500" placeholder="Remarks" class="h-10 rounded-lg border px-3 text-xs"><div class="flex gap-2"><button name="action" value="verify" class="rounded-lg bg-ink px-3 py-2 text-xs text-white">Verify</button><button name="action" value="reject" class="rounded-lg border px-3 py-2 text-xs text-red-600">Reject</button></div></form>`:escapeHTML(r.remarks||"")}</td></tr>`).join(""))}
+    ${table(["Session","Staff","Count","Difference","Available","Status","Review"],reconciliationRows.map(r=>`<tr class="border-b"><td class="p-4">#${r.sessionId}</td><td class="p-4">${escapeHTML(r.userEmail)}</td><td class="p-4">${money(r.countedCash,r.currency)} of ${money(r.expectedCash,r.currency)}</td><td class="p-4 ${r.cashDifference<0?"text-red-600":"text-green-600"}">${money(r.cashDifference,r.currency)}</td><td class="p-4">${r.status==="verified"?money(r.currentAvailableCash,r.currency):"—"}</td><td class="p-4 capitalize">${escapeHTML(r.status)}</td><td class="p-4">${r.status==="pending"?`<form data-form="reconciliation-review" data-reconciliation-id="${r.id}" class="grid gap-2"><input name="remarks" maxlength="500" placeholder="Remarks" class="h-10 rounded-lg border px-3 text-xs"><div class="flex gap-2"><button name="action" value="verify" class="rounded-lg bg-ink px-3 py-2 text-xs text-white">Verify</button><button name="action" value="reject" class="rounded-lg border px-3 py-2 text-xs text-red-600">Reject</button></div></form>`:r.status==="verified"?`<form data-form="reconciliation-review" data-reconciliation-id="${r.id}" class="grid gap-2"><div class="text-xs text-gray-500">${escapeHTML(r.remarks||"")}</div><input name="remarks" required minlength="10" maxlength="500" placeholder="Reason for voiding verification" class="h-10 rounded-lg border px-3 text-xs"><button name="action" value="void" class="w-fit rounded-lg border border-red-300 px-3 py-2 text-xs text-red-600">Void verification</button></form>`:escapeHTML(r.remarks||"")}</td></tr>`).join(""))}
     <h2 class="mb-3 mt-7 font-semibold">Open staff sessions</h2>
     ${table(["Session","Staff","Current cash","Admin close"],openSessions.map(x=>`<tr class="border-b"><td class="p-4">#${x.id}</td><td class="p-4">${escapeHTML(x.openedByEmail)}</td><td class="p-4 font-semibold">${money(x.expectedCash,x.currency)}</td><td class="p-4"><form data-form="admin-close" data-session-id="${x.id}" data-expected="${x.expectedCash}" class="grid gap-2 sm:grid-cols-3">${amountField("Counted cash","closingCash",(x.expectedCash/100).toFixed(2))}<input name="reason" required maxlength="500" placeholder="Reason" class="mt-5 h-11 rounded-lg border px-3 text-xs sm:col-span-2"><button class="rounded-lg bg-ink px-4 py-2 text-xs text-white sm:col-span-3">Close session</button></form></td></tr>`).join(""))}`;
 }
@@ -716,8 +716,29 @@ $("#other-page").addEventListener("submit", async e => {
       await loadPage(); toast(`Session closed · difference ${money(result.difference)}`);
     } else if (kind === "reconciliation-review") {
       const action = e.submitter?.value || data.action;
-      const result = await api(`/api/register-cash-reconciliations/${form.dataset.reconciliationId}/review`, jsonRequest({action,remarks:data.remarks || ""}));
-      await loadPage(); toast(action === "verify" ? `Reconciliation verified · available ${money(result.verifiedAvailableCash)}` : "Reconciliation rejected");
+      const remarks = (data.remarks || "").trim();
+
+      if (action === "void") {
+        if (remarks.length < 10) {
+          toast("Enter a void reason of at least 10 characters");
+          return;
+        }
+        if (!confirm("Void this verified reconciliation? Its cash will no longer be available for carry-forward. This action cannot be undone.")) return;
+      }
+
+      const result = await api(
+        `/api/register-cash-reconciliations/${form.dataset.reconciliationId}/review`,
+        jsonRequest({action, remarks})
+      );
+
+      await loadPage();
+      toast(
+        action === "verify"
+          ? `Reconciliation verified · available ${money(result.verifiedAvailableCash)}`
+          : action === "void"
+            ? "Reconciliation verification voided"
+            : "Reconciliation rejected"
+      );
     }
   } catch (error) { toast(error.message); }
   finally { delete form.dataset.saving; if (submit) submit.disabled = false; }
