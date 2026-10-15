@@ -36,6 +36,14 @@ async function setup(t, options = {}) {
     const responses = {
       '/api/auth/me':{id:1,email:'test@example.test',role:'superadmin',mustChangePassword:options.mustChangePassword || false},
       '/api/settings':{currency:'LKR',currencies:[{code:'LKR',name:'Sri Lankan Rupee'}]},
+      '/api/optimized-debts/capacity':{
+        enabled:false,
+        currency:'LKR',
+        verifiedMargin:500000,
+        outstandingDebt:125000,
+        availableCredit:375000,
+        unverifiedItems:0
+      },
       '/api/customers':options.customers || [],
       '/api/customers/1':options.customerAccount || {customer:{id:1,name:'Jane'},sales:[],payments:[]},
       '/api/products':options.empty ? [] : [product], '/api/categories':[{id:1,name:'Drinks',productCount:1}],
@@ -80,6 +88,15 @@ test('menu starts and every management page renders without missing functions', 
     await page.evaluate(route => navigate(route), route);
     assert.ok(await page.locator('#other-page h1').count(), `${route} did not render`);
     assert.doesNotMatch(await page.locator('#other-page').innerText(), /Could not load/);
+    if (route === 'settings') {
+      const panel = page.locator('#optimized-debts-panel');
+      await panel.getByText('Available credit headroom').waitFor();
+      assert.match(await panel.innerText(), /Optimized Debts/);
+      assert.equal(
+        await panel.locator('input[name="enabled"]').isChecked(),
+        false
+      );
+    }
   }
   assert.deepEqual(errors, []);
 });
