@@ -18,6 +18,13 @@ The application uses Go, PostgreSQL, and Tailwind CSS.
 | [Finance and Capital](FINANCE_AND_CAPITAL.md) | Capital, financial accounts, purchase payments and drawings |
 | [Optimized Debts](OPTIMIZED_DEBTS.md) | Inventory-margin credit capacity and safety rules |
 
+## Technical operations guides
+
+- [Installation and Development](INSTALLATION.md)
+- [Deployment and CI/CD](DEPLOYMENT.md)
+- [Security, Backups and Recovery](SECURITY_AND_BACKUP.md)
+- [Troubleshooting](TROUBLESHOOTING.md)
+
 ## Existing technical documentation
 
 - [Main README](../README.md)
