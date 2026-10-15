@@ -23,7 +23,7 @@ import (
 	"time"
 )
 
-//go:embed web/* migrations/*.sql
+//go:embed web/* migrations/*.sql docs/*.md
 var assets embed.FS
 
 type Product struct {
@@ -1478,6 +1478,8 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) routes() http.Handler {
 	private := http.NewServeMux()
 	private.HandleFunc("GET /api/auth/me", s.me)
+	private.HandleFunc("GET /api/help", s.helpIndex)
+	private.HandleFunc("GET /api/help/{slug}", s.helpArticle)
 	s.operationRoutes(private)
 	s.customerRoutes(private)
 	s.controlRoutes(private)
@@ -1519,7 +1521,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
-	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers", "/guest-refreshments"} {
+	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers", "/help", "/guest-refreshments"} {
 		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, sub, "index.html")
 		})

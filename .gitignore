@@ -6,3 +6,7 @@ fridge-pos.backup
 .env
 
 shop_controls.go.before_reconciliation.bak
+
+# Generated browser audit reports
+/reports/mobile-audit.json
+/reports/mobile-audit.log

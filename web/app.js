@@ -94,7 +94,7 @@ let pageRequest = 0;
 const pageTitles = {
   customers: "Customers", pos: "Point of sale", products: "Products", session: "Register session",
   sales: "Sales history", inventory: "Inventory", purchases: "Purchases",
-  petty: "Petty cash", users: "Staff users", settings: "Settings", reports: "Daily report", audit: "Audit history", account: "Account",
+  petty: "Petty cash", users: "Staff users", settings: "Settings", reports: "Daily report", audit: "Audit history", account: "Account", help: "Help & Documentation",
 };
 function canVisit(next) {
   if (!Object.hasOwn(pageTitles, next)) return false;
@@ -353,7 +353,11 @@ function renderOther() {
   let title = "",
     desc = "",
     body = "";
-  if (page === "customers") {
+  if (page === "help") {
+    title = "Help & Documentation";
+    desc = "Find instructions for using Mekmaa POS.";
+    body = helpView();
+  } else if (page === "customers") {
     title = "Customers"; desc = "Contact details, purchases, and outstanding balances. Customers do not need a login."; body = customersView();
   } else if (page === "products") {
     title = "Products";
@@ -511,6 +515,12 @@ async function loadPage() {
   const request = ++pageRequest, requestedPage = page;
   try {
     const customerId = new URLSearchParams(location.search).get("id");
+    if (requestedPage === "help") {
+      await helpLoadIndex();
+      if (request !== pageRequest) return;
+      renderOther();
+      return;
+    }
     const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements"+location.search, purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
     const needUsers = requestedPage === "users" || (requestedPage === "session" && currentUser?.role === "superadmin");
     const [savedSettings, savedProducts, savedSession, records, savedCategories, savedCustomers, savedAllocations, savedUsersForControls, savedFundingSources, savedReconciliations, savedCarryForwardOptions] = await Promise.all([
