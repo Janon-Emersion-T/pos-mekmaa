@@ -258,7 +258,36 @@ func (s *Server) resetDatabase(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not record actor")
 		return
 	}
-	if _, err = tx.ExecContext(r.Context(), `TRUNCATE TABLE register_cash_allocations,customer_payment_reversals,customer_balance_adjustments,customer_payments,customer_opening_balances,refund_items,refunds,sale_items,sales,petty_cash_entries,purchase_items,purchases,inventory_movements,products,categories,product_images,customers,request_results,login_limits,audit_events RESTART IDENTITY`); err != nil {
+	if _, err = tx.ExecContext(r.Context(), `TRUNCATE TABLE
+    audit_events,
+    cash_shortage_resolutions,
+    cash_shortages,
+    categories,
+    customer_balance_adjustments,
+    customer_opening_balances,
+    customer_payment_reversals,
+    customer_payments,
+    customers,
+    financial_accounts,
+    financial_ledger_entries,
+    financial_transfers,
+    guest_refreshments,
+    inventory_movements,
+    login_limits,
+    petty_cash_entries,
+    product_images,
+    products,
+    purchase_items,
+    purchases,
+    refund_items,
+    refunds,
+    register_cash_allocations,
+    register_cash_reconciliations,
+    register_sessions,
+    request_results,
+    sale_items,
+    sales
+RESTART IDENTITY`); err != nil {
 		problem(w, 500, "Could not reset database")
 		return
 	}
