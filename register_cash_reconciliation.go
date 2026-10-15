@@ -242,18 +242,6 @@ func (s *Server) reviewRegisterCashReconciliation(w http.ResponseWriter, r *http
 		problem(w, 409, "Reconciliation is not linked to a closed register")
 		return
 	}
-	var accountID int64
-	if err = tx.QueryRowContext(r.Context(), `
-		SELECT id
-		FROM financial_accounts
-		WHERE account_type='staff_cash'
-		  AND user_id=$1
-		  AND currency=$2
-		FOR SHARE
-	`, userID, currency).Scan(&accountID); err != nil {
-		problem(w, 409, "Cashier financial account is unavailable")
-		return
-	}
 	if req.Action == "reject" {
 		_, err = tx.ExecContext(r.Context(), `
 			UPDATE register_cash_reconciliations
@@ -274,6 +262,15 @@ func (s *Server) reviewRegisterCashReconciliation(w http.ResponseWriter, r *http
 		respond(w, 200, map[string]bool{"ok": true})
 		return
 	}
+	// Historical registers may predate persistent cashier accounts.
+	// Create the account at zero balance; never capitalize the closing count.
+	if _, err = getOrCreateFinancialAccount(
+		r.Context(), tx, "staff_cash", &userID, currency,
+	); err != nil {
+		problem(w, 500, "Could not initialize cashier financial account")
+		return
+	}
+
 	available, ledgerID, err := verifiedPhysicalAvailable(r.Context(), tx, id)
 	if err != nil {
 		problem(w, 409, "Could not calculate verified cash availability")
