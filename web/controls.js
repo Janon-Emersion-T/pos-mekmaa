@@ -100,65 +100,54 @@ function paymentControls(p) {
 
 function renderPosInsights() {
   const el = $("#pos-insights");
-  if (!el) return;
+  const debtorsEl = $("#pos-debtors-list");
+
+  if (el) {
+    el.innerHTML = `<div class="rounded-lg border border-gray-100 bg-white p-3 text-xs">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-gray-500">Current cash in hand</span>
+        <strong>${session ? money(session.expectedCash, session.currency) : "No open session"}</strong>
+      </div>
+      ${session ? `<div class="mt-2 grid grid-cols-2 gap-2 text-[10px] text-gray-500">
+        <span>Cash sales ${money(session.cashSales || 0, session.currency)}</span>
+        <span>Collections ${money(session.cashCollections || 0, session.currency)}</span>
+      </div>` : ""}
+    </div>`;
+  }
+
+  if (!debtorsEl) return;
 
   const debtors = customers
     .map(c => ({
       ...c,
-      dueBalances: (c.balances || []).filter(b => b.outstanding > 0),
+      dueBalances: (c.balances || []).filter(b => b.outstanding > 0)
     }))
     .filter(c => c.dueBalances.length)
     .sort((a, b) =>
-      b.dueBalances.reduce((sum, x) => sum + x.outstanding, 0) -
-      a.dueBalances.reduce((sum, x) => sum + x.outstanding, 0)
+      b.dueBalances.reduce((sum, b) => sum + b.outstanding, 0) -
+      a.dueBalances.reduce((sum, b) => sum + b.outstanding, 0)
     );
 
-  const totals = new Map();
-  for (const customer of debtors) {
-    for (const balance of customer.dueBalances) {
-      const current = totals.get(balance.currency) || { outstanding: 0, overdue: 0 };
-      current.outstanding += balance.outstanding;
-      current.overdue += Math.max(0, balance.overdue || 0);
-      totals.set(balance.currency, current);
-    }
-  }
-
-  const totalText = [...totals]
-    .map(([currency, value]) => money(value.outstanding, currency))
-    .join(" · ");
-
-  el.innerHTML = `<div class="rounded-lg border border-gray-100 bg-white p-3 text-xs">
-    <div class="flex items-center justify-between gap-2">
-      <span class="text-gray-500">Current cash in hand</span>
-      <strong>${session ? money(session.expectedCash, session.currency) : "No open session"}</strong>
-    </div>
-    ${session ? `<div class="mt-2 grid grid-cols-2 gap-2 text-[10px] text-gray-500">
-      <span>Cash sales ${money(session.cashSales || 0, session.currency)}</span>
-      <span>Collections ${money(session.cashCollections || 0, session.currency)}</span>
-    </div>` : ""}
-  </div>
-  <section id="pos-debtors-panel" class="rounded-lg border border-gray-200 bg-white p-3 text-xs">
-    <div class="flex items-center justify-between gap-2">
-      <h3 class="font-semibold text-gray-800">Debtors (${debtors.length})</h3>
-      <a href="/customers" data-page="customers" class="font-medium text-orange-600">View all</a>
-    </div>
-    <div class="mt-3 rounded-lg bg-orange-50 p-3">
-      <p class="text-[10px] font-medium uppercase tracking-wide text-orange-700">Total outstanding</p>
-      <p class="mt-1 text-base font-bold text-gray-900">${totalText || money(0, settings.currency)}</p>
-    </div>
-    ${debtors.length ? `<div class="mt-3 max-h-72 space-y-2 overflow-y-auto" aria-label="Customers with outstanding balances">
-      ${debtors.map(c => `<a href="/customers?id=${c.id}&collect=1" data-page="customers"
-        class="block rounded-lg border border-gray-100 bg-gray-50 p-3 hover:border-orange-200 hover:bg-orange-50">
-        <div class="flex items-start justify-between gap-2">
-          <span class="min-w-0 truncate font-semibold text-gray-800">${escapeHTML(c.name)}${c.isOwner ? ' <span class="text-orange-600">(Owner)</span>' : ''}</span>
-          <span class="shrink-0 text-right font-semibold text-gray-900">${c.dueBalances.map(b => money(b.outstanding, b.currency)).join(" · ")}</span>
-        </div>
-        ${c.dueBalances.some(b => b.overdue > 0) ?
-          `<p class="mt-1 text-[10px] text-red-600">Overdue: ${c.dueBalances.filter(b => b.overdue > 0).map(b => money(b.overdue, b.currency)).join(" · ")}</p>` : ""}
-        <p class="mt-1 text-[10px] text-orange-600">View account / collect payment →</p>
-      </a>`).join("")}
-    </div>` : '<p class="mt-3 text-gray-500">No customers currently owe money.</p>'}
-  </section>`;
+  debtorsEl.innerHTML = debtors.length
+    ? `<div class="overflow-x-auto">
+        <table class="w-full text-left text-sm">
+          <thead>
+            <tr class="border-b text-xs text-gray-500">
+              <th class="pb-3 font-medium">Customer</th>
+              <th class="pb-3 text-right font-medium">Outstanding</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${debtors.map(c => `<tr class="border-b border-gray-100">
+              <td class="py-3 font-medium">${escapeHTML(c.name)}${c.isOwner ? ' (Owner)' : ''}</td>
+              <td class="py-3 text-right font-semibold">
+                ${c.dueBalances.map(b => money(b.outstanding, b.currency)).join(" · ")}
+              </td>
+            </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`
+    : '<p class="text-sm text-gray-500">No outstanding debtors.</p>';
 }
 
 $("#other-page").addEventListener("submit", async e => {

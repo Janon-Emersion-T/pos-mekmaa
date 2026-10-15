@@ -576,7 +576,7 @@ test('owner account overview shows outstanding and settlement history', async t 
 });
 
 
-test('POS debtors panel shows all outstanding customers and totals', async t => {
+test('POS debtors row appears below products and shows only outstanding customers', async t => {
   const customers = [
     {id:1, name:'Alice', balances:[{currency:'LKR',outstanding:12000,overdue:2000}]},
     {id:2, name:'Bob', balances:[{currency:'LKR',outstanding:5000,overdue:0}]},
@@ -590,23 +590,41 @@ test('POS debtors panel shows all outstanding customers and totals', async t => 
   const {page,errors} = await setup(t,{customers});
   await ready(page);
 
-  const panel = page.locator('#pos-debtors-panel');
-  await panel.waitFor({state:'visible'});
+  const row = page.locator('#pos-debtors-row');
+  const list = page.locator('#pos-debtors-list');
 
-  assert.match(await panel.innerText(), /Debtors \(6\)/);
-  assert.match(await panel.innerText(), /Total outstanding/i);
-  assert.match(await panel.innerText(), /410\.00/);
-  assert.match(await panel.innerText(), /Overdue/);
-  assert.match(await panel.innerText(), /Owner/);
+  await row.waitFor({state:'visible'});
+
+  assert.equal(await row.locator('h2').innerText(), 'Debtors');
+
+  const productPosition = await page.locator('#products').boundingBox();
+  const debtorPosition = await row.boundingBox();
+
+  assert.ok(
+    debtorPosition.y >= productPosition.y + productPosition.height,
+    'Debtors must appear below products'
+  );
+
+  const text = await list.innerText();
 
   for (const name of ['Alice','Bob','Charlie','Diana','Edward']) {
-    assert.match(await panel.innerText(), new RegExp(name));
+    assert.match(text, new RegExp(name));
   }
 
-  assert.doesNotMatch(await panel.innerText(), /Paid Customer/);
+  assert.match(text, /Owner/);
+  assert.match(text, /120\.00/);
+  assert.match(text, /80\.00/);
 
-  const debtorLinks = panel.locator('a[href*="collect=1"]');
-  assert.equal(await debtorLinks.count(), 6);
+  assert.doesNotMatch(text, /Paid Customer/);
+
+  assert.equal(await list.locator('tbody tr').count(), 6);
+  assert.equal(await list.locator('a').count(), 0);
+
+  assert.equal(await page.locator('#pos-insights a').count(), 0);
+  assert.match(
+    await page.locator('#pos-insights').innerText(),
+    /Current cash in hand/
+  );
 
   assert.deepEqual(errors,[]);
 });
