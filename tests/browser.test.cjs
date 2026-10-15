@@ -628,3 +628,218 @@ test('POS debtors row appears below products and shows only outstanding customer
 
   assert.deepEqual(errors,[]);
 });
+
+test('POS collection popup records a partial cash payment', async t => {
+  const debtor = {
+    id:1,name:'Jane Silva',
+    balances:[{currency:'LKR',outstanding:10000,overdue:0}]
+  };
+  const credit = {
+    ...sale,id:7,payment:'credit',customerId:1,
+    outstanding:10000,currency:'LKR'
+  };
+  const {page,errors,requests} = await setup(t,{
+    customers:[debtor],
+    customerAccount:{customer:debtor,sales:[credit],payments:[]},
+    handle:async(route,pathname)=>{
+      if(pathname !== '/api/customers/1/payments') return false;
+      await route.fulfill({
+        status:201,
+        json:{id:10,outstanding:6000,currency:'LKR'}
+      });
+      return true;
+    }
+  });
+
+  await ready(page);
+  await page.locator('[data-pos-collect="1"]').click();
+  await page.locator('#pos-collection-dialog').waitFor({state:'visible'});
+
+  assert.equal(
+    await page.locator('#pos-collection-target').inputValue(),
+    'sale:7'
+  );
+
+  await page.locator('#pos-collection-amount').fill('40.00');
+  await page.locator('#pos-collection-form [name=payment]').selectOption('cash');
+  await page.locator('#pos-collection-submit').click();
+
+  await page.locator('#pos-collection-dialog').waitFor({state:'hidden'});
+
+  const payment = requests.find(r=>
+    r.path === '/api/customers/1/payments' && r.method === 'POST'
+  );
+
+  assert.equal(payment.body.saleId,7);
+  assert.equal(payment.body.amount,4000);
+  assert.equal(payment.body.payment,'cash');
+  assert.equal(payment.body.sessionId,1);
+  assert.ok(payment.body.requestId);
+  assert.deepEqual(errors,[]);
+});
+
+test('POS collection popup supports full card payment and opening balances', async t => {
+  const debtor = {
+    id:1,name:'Jane Silva',
+    balances:[{currency:'LKR',outstanding:7500,overdue:0}]
+  };
+  const openingBalance = {
+    id:4,amount:10000,paidAmount:2500,
+    outstanding:7500,currency:'LKR'
+  };
+
+  const {page,errors,requests} = await setup(t,{
+    customers:[debtor],
+    customerAccount:{
+      customer:debtor,sales:[],payments:[],openingBalance
+    },
+    handle:async(route,pathname)=>{
+      if(pathname !== '/api/customers/1/payments') return false;
+      await route.fulfill({
+        status:201,
+        json:{id:11,outstanding:0,currency:'LKR'}
+      });
+      return true;
+    }
+  });
+
+  await ready(page);
+  await page.locator('[data-pos-collect="1"]').click();
+  await page.locator('#pos-collection-dialog').waitFor({state:'visible'});
+
+  assert.equal(
+    await page.locator('#pos-collection-target').inputValue(),
+    'opening:4'
+  );
+
+  await page.locator('#pos-collection-amount').fill('10.00');
+  await page.locator('#pos-collection-full').click();
+
+  assert.equal(
+    await page.locator('#pos-collection-amount').inputValue(),
+    '75.00'
+  );
+
+  await page.locator('#pos-collection-form [name=payment]').selectOption('card');
+  await page.locator('#pos-collection-submit').click();
+
+  await page.locator('#pos-collection-dialog').waitFor({state:'hidden'});
+
+  const payment = requests.find(r=>r.path==='/api/customers/1/payments');
+
+  assert.equal(payment.body.openingBalanceId,4);
+  assert.equal(payment.body.saleId,undefined);
+  assert.equal(payment.body.amount,7500);
+  assert.equal(payment.body.payment,'card');
+  assert.deepEqual(errors,[]);
+});
+
+test('POS collection rejects overpayment before calling the API', async t => {
+  const debtor = {
+    id:1,name:'Jane Silva',
+    balances:[{currency:'LKR',outstanding:10000,overdue:0}]
+  };
+  const credit = {...sale,id:7,payment:'credit',outstanding:10000};
+
+  const {page,errors,requests} = await setup(t,{
+    customers:[debtor],
+    customerAccount:{customer:debtor,sales:[credit],payments:[]}
+  });
+
+  await ready(page);
+  await page.locator('[data-pos-collect="1"]').click();
+  await page.locator('#pos-collection-dialog').waitFor({state:'visible'});
+
+  await page.locator('#pos-collection-amount').fill('101.00');
+  await page.locator('#pos-collection-submit').click();
+
+  await page.waitForFunction(() =>
+    document.querySelector('#pos-collection-error').textContent
+      .includes('no more than')
+  );
+
+  assert.equal(
+    requests.filter(r=>r.path==='/api/customers/1/payments').length,
+    0
+  );
+  assert.deepEqual(errors,[]);
+});
+
+test('POS collection recovers a lost response using the same request ID', async t => {
+  const debtor = {
+    id:1,name:'Jane Silva',
+    balances:[{currency:'LKR',outstanding:10000,overdue:0}]
+  };
+  const credit = {...sale,id:7,payment:'credit',outstanding:10000};
+
+  let attempts = 0;
+
+  const {page,errors,requests} = await setup(t,{
+    customers:[debtor],
+    customerAccount:{customer:debtor,sales:[credit],payments:[]},
+    handle:async(route,pathname)=>{
+      if(pathname !== '/api/customers/1/payments') return false;
+
+      attempts++;
+
+      if(attempts === 1) {
+        await route.abort('failed');
+      } else {
+        await route.fulfill({
+          status:200,
+          json:{id:12,outstanding:5000,currency:'LKR'}
+        });
+      }
+
+      return true;
+    }
+  });
+
+  await ready(page);
+  await page.locator('[data-pos-collect="1"]').click();
+  await page.locator('#pos-collection-dialog').waitFor({state:'visible'});
+
+  await page.locator('#pos-collection-amount').fill('50.00');
+  await page.locator('#pos-collection-submit').click();
+
+  await page.locator('#pos-collection-recover').waitFor({state:'visible'});
+
+  await ready(page);
+
+  await page.locator('[data-pos-recover-pending]').click();
+  await page.locator('#pos-collection-recover').click();
+
+  await page.locator('#pos-collection-dialog').waitFor({state:'hidden'});
+
+  const payments = requests.filter(r=>r.path==='/api/customers/1/payments');
+
+  assert.equal(payments.length,2);
+  assert.deepEqual(payments[0].body,payments[1].body);
+  assert.deepEqual(errors,[]);
+});
+
+test('POS collection dialog fits a mobile viewport', async t => {
+  const debtor = {
+    id:1,name:'Jane Silva',
+    balances:[{currency:'LKR',outstanding:10000,overdue:0}]
+  };
+  const credit = {...sale,id:7,payment:'credit',outstanding:10000};
+
+  const {page,errors} = await setup(t,{
+    customers:[debtor],
+    customerAccount:{customer:debtor,sales:[credit],payments:[]}
+  });
+
+  await page.setViewportSize({width:375,height:667});
+  await ready(page);
+
+  await page.locator('[data-pos-collect="1"]').click();
+  await page.locator('#pos-collection-dialog').waitFor({state:'visible'});
+
+  const box = await page.locator('#pos-collection-dialog').boundingBox();
+
+  assert.ok(box.width <= 375);
+  assert.ok(box.height <= 667);
+  assert.ok(box.x >= 0);
+  assert.deepEqual(errors,[]);
+});

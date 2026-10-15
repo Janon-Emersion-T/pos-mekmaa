@@ -142,13 +142,384 @@ function renderPosInsights() {
               <td class="py-3 font-medium">${escapeHTML(c.name)}${c.isOwner ? ' (Owner)' : ''}</td>
               <td class="py-3 text-right font-semibold">
                 ${c.dueBalances.map(b => money(b.outstanding, b.currency)).join(" · ")}
+                <button type="button" data-pos-collect="${c.id}"
+                  class="ml-3 rounded-lg bg-orange-600 px-3 py-2 text-xs font-semibold text-white">
+                  Collect
+                </button>
               </td>
             </tr>`).join("")}
           </tbody>
         </table>
       </div>`
     : '<p class="text-sm text-gray-500">No outstanding debtors.</p>';
+
+  showPosCollectionRecovery();
 }
+
+
+// POS debt collection uses the same idempotent customer-payment workflow
+// as the Customers page. A pending payment must be recovered, never recreated.
+let posCollectionAccount = null;
+let posCollectionTargets = [];
+let posCollectionCustomerId = null;
+let posCollectionBusy = false;
+
+function posCollectionPending() {
+  if (pendingCollection) return pendingCollection;
+  try {
+    const stored = localStorage.getItem(collectionKey());
+    pendingCollection = stored ? JSON.parse(stored) : null;
+  } catch {
+    pendingCollection = null;
+  }
+  return pendingCollection;
+}
+
+function posCollectionRecoveryUI() {
+  const pending = posCollectionPending();
+  const recover = $("#pos-collection-recover");
+  recover.classList.toggle("hidden", !pending);
+  recover.disabled = posCollectionBusy || !pending;
+  $("#pos-collection-submit").disabled = posCollectionBusy || Boolean(pending);
+  return pending;
+}
+
+async function recoverPosCollection() {
+  const pending = posCollectionPending();
+  if (!pending || posCollectionBusy) return;
+
+  const elements = posCollectionElements();
+  posCollectionSetBusy(true);
+  elements.error.textContent = "";
+
+  try {
+    const result = await api(
+      `/api/customers/${pending.customerId}/payments`,
+      jsonRequest(pending.request)
+    );
+
+    localStorage.removeItem(collectionKey());
+    pendingCollection = null;
+
+    elements.dialog.close();
+    await loadPage();
+
+    toast(`Payment confirmed. Remaining on selected debt: ${money(result.outstanding, result.currency)}`);
+  } catch (error) {
+    if ([400, 403, 404, 409].includes(error.status)) {
+      localStorage.removeItem(collectionKey());
+      pendingCollection = null;
+      elements.error.textContent = error.message;
+    } else {
+      elements.error.textContent =
+        "Payment confirmation is still uncertain. Retry recovery; do not create another payment.";
+    }
+  } finally {
+    posCollectionSetBusy(false);
+    posCollectionRecoveryUI();
+  }
+}
+
+function posCollectionElements() {
+  return {
+    dialog: $("#pos-collection-dialog"),
+    form: $("#pos-collection-form"),
+    target: $("#pos-collection-target"),
+    amount: $("#pos-collection-amount"),
+    full: $("#pos-collection-full"),
+    error: $("#pos-collection-error"),
+    remaining: $("#pos-collection-remaining"),
+    submit: $("#pos-collection-submit")
+  };
+}
+
+function posCollectionSelectedTarget() {
+  const {target} = posCollectionElements();
+  return posCollectionTargets.find(t => t.key === target.value);
+}
+
+function posCollectionUpdateRemaining() {
+  const {amount,remaining,error} = posCollectionElements();
+  const target = posCollectionSelectedTarget();
+
+  if (!target) {
+    remaining.textContent = "";
+    return;
+  }
+
+  const entered = amount.value ? Math.round(Number(amount.value) * 100) : 0;
+  const valid = Number.isSafeInteger(entered) && entered >= 0;
+
+  remaining.textContent = valid
+    ? `Remaining on selected debt: ${money(Math.max(0, target.outstanding - entered), target.currency)}`
+    : "";
+
+  if (error.textContent && valid && entered <= target.outstanding) {
+    error.textContent = "";
+  }
+}
+
+function posCollectionSetBusy(value) {
+  posCollectionBusy = value;
+  const {form,submit} = posCollectionElements();
+  for (const control of form.querySelectorAll("input, select, textarea, button")) {
+    control.disabled = value;
+  }
+  submit.textContent = value ? "Recording payment..." : "Record collection";
+}
+
+async function openPosCollection(customerId) {
+  const elements = posCollectionElements();
+  if (posCollectionBusy) return;
+
+  elements.error.textContent = "";
+
+  if (posCollectionPending()) {
+    elements.dialog.showModal();
+    posCollectionRecoveryUI();
+    elements.error.textContent =
+      "A previous payment is awaiting confirmation. Recover it before collecting another.";
+    return;
+  }
+  if (!session) {
+    throw Error("Open your own register session before collecting a payment.");
+  }
+
+  const customer = customers.find(c => c.id === customerId);
+  if (!customer) throw Error("Customer not found.");
+
+  const account = await api(`/api/customers/${customerId}`);
+  const targets = [];
+
+  if (account.openingBalance?.outstanding > 0) {
+    const balance = account.openingBalance;
+    targets.push({
+      key: `opening:${balance.id}`,
+      openingBalanceId: balance.id,
+      outstanding: balance.outstanding,
+      currency: balance.currency,
+      label: `Opening balance · ${money(balance.outstanding, balance.currency)}`
+    });
+  }
+
+  for (const sale of account.sales || []) {
+    if (sale.payment !== "credit" || sale.outstanding <= 0) continue;
+    targets.push({
+      key: `sale:${sale.id}`,
+      saleId: sale.id,
+      outstanding: sale.outstanding,
+      currency: sale.currency,
+      label: `Receipt #${sale.id} · ${money(sale.outstanding, sale.currency)}`
+    });
+  }
+
+  const eligible = targets.filter(t => t.currency === session.currency);
+  if (!eligible.length) {
+    throw Error("No outstanding debt matches your current register currency.");
+  }
+
+  posCollectionAccount = account;
+  posCollectionTargets = eligible;
+  posCollectionCustomerId = customerId;
+
+  $("#pos-collection-customer").textContent = account.customer.name;
+
+  const outstanding = (customer.balances || [])
+    .filter(b => b.outstanding > 0)
+    .map(b => money(b.outstanding, b.currency))
+    .join(" · ");
+
+  $("#pos-collection-total").textContent = outstanding;
+
+  elements.target.replaceChildren();
+
+  for (const target of eligible) {
+    const option = document.createElement("option");
+    option.value = target.key;
+    option.textContent = target.label;
+    elements.target.append(option);
+  }
+
+  elements.amount.value = (eligible[0].outstanding / 100).toFixed(2);
+  elements.form.elements.payment.value = "cash";
+  elements.form.elements.note.value = "";
+  posCollectionUpdateRemaining();
+
+  elements.dialog.showModal();
+  posCollectionRecoveryUI();
+}
+
+function posCollectionClose() {
+  if (posCollectionBusy) return;
+  posCollectionElements().dialog.close();
+}
+
+async function submitPosCollection(event) {
+  event.preventDefault();
+  if (posCollectionBusy) return;
+
+  const elements = posCollectionElements();
+  elements.error.textContent = "";
+
+  const target = posCollectionSelectedTarget();
+
+  try {
+    if (posCollectionPending()) {
+      throw Error("Recover the previous collection before recording another payment.");
+    }
+    if (!session) {
+      throw Error("Open your register session before collecting a payment.");
+    }
+    if (!target) {
+      throw Error("Select an outstanding receipt or opening balance.");
+    }
+
+    const amount = minorUnits(elements.amount.value);
+
+    if (!Number.isSafeInteger(amount) || amount <= 0 || amount > target.outstanding) {
+      throw Error("Enter an amount greater than zero and no more than the selected outstanding balance.");
+    }
+
+    if (amount > 10000000) {
+      throw Error("This payment exceeds the maximum allowed amount.");
+    }
+
+    if (target.currency !== session.currency) {
+      throw Error("The register currency must match the debt.");
+    }
+
+    const payment = elements.form.elements.payment.value;
+    if (!["cash", "card"].includes(payment)) {
+      throw Error("Select cash or card.");
+    }
+
+    const request = {
+      requestId: crypto.randomUUID(),
+      ...(target.openingBalanceId
+        ? {openingBalanceId: target.openingBalanceId}
+        : {saleId: target.saleId}),
+      sessionId: session.id,
+      amount,
+      payment,
+      note: elements.form.elements.note.value.trim()
+    };
+
+    // Persist before sending so an uncertain response can be retried safely.
+    const pending = {customerId: posCollectionCustomerId, request};
+    localStorage.setItem(collectionKey(), JSON.stringify(pending));
+    pendingCollection = pending;
+
+    posCollectionSetBusy(true);
+
+    const result = await api(
+      `/api/customers/${pending.customerId}/payments`,
+      jsonRequest(pending.request)
+    );
+
+    localStorage.removeItem(collectionKey());
+    pendingCollection = null;
+
+    elements.dialog.close();
+
+    await loadPage();
+    toast(`Payment recorded. Remaining on selected debt: ${money(result.outstanding, result.currency)}`);
+  } catch (error) {
+    // The server rejects these requests definitively. Network errors and
+    // ambiguous server failures retain the original request ID for recovery.
+    if (pendingCollection && [400, 403, 404, 409].includes(error.status)) {
+      localStorage.removeItem(collectionKey());
+      pendingCollection = null;
+    }
+
+    elements.error.textContent = pendingCollection
+      ? "Payment confirmation is uncertain. Do not submit again. Recover the pending payment."
+      : error.message;
+    posCollectionRecoveryUI();
+  } finally {
+    posCollectionSetBusy(false);
+    posCollectionRecoveryUI();
+  }
+}
+
+$("#pos-collection-recover").addEventListener("click", recoverPosCollection);
+
+// Make recovery available from the POS page after a reload, even if
+// the original customer no longer appears in the current debtor list.
+function showPosCollectionRecovery() {
+  const pending = posCollectionPending();
+  const container = $("#pos-debtors-list");
+
+  if (!container || !pending) return;
+
+  if (!container.querySelector("[data-pos-recover-pending]")) {
+    container.insertAdjacentHTML(
+      "afterbegin",
+      `<div class="mb-4 rounded-lg border border-orange-300 bg-orange-50 p-4 text-sm">
+        <p class="font-semibold text-orange-900">Payment awaiting confirmation</p>
+        <p class="mt-1 text-orange-800">Recover the previous collection before recording another payment.</p>
+        <button type="button" data-pos-recover-pending
+          class="mt-3 rounded-lg bg-orange-600 px-4 py-3 font-semibold text-white">
+          Recover payment
+        </button>
+      </div>`
+    );
+  }
+}
+
+document.addEventListener("click", async event => {
+  if (!event.target.closest("[data-pos-recover-pending]")) return;
+
+  const dialog = $("#pos-collection-dialog");
+
+  if (!dialog.open) dialog.showModal();
+
+  posCollectionRecoveryUI();
+
+  $("#pos-collection-error").textContent =
+    "Recover the pending payment using its original transaction ID.";
+});
+
+
+
+document.addEventListener("click", async event => {
+  const collect = event.target.closest("[data-pos-collect]");
+  if (!collect) return;
+
+  collect.disabled = true;
+
+  try {
+    await openPosCollection(Number(collect.dataset.posCollect));
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    collect.disabled = false;
+  }
+});
+
+$("#pos-collection-close").addEventListener("click", posCollectionClose);
+
+$("#pos-collection-dialog").addEventListener("cancel", event => {
+  if (posCollectionBusy) event.preventDefault();
+});
+
+$("#pos-collection-target").addEventListener("change", () => {
+  const target = posCollectionSelectedTarget();
+  if (target) {
+    $("#pos-collection-amount").value = (target.outstanding / 100).toFixed(2);
+  }
+  posCollectionUpdateRemaining();
+});
+
+$("#pos-collection-amount").addEventListener("input", posCollectionUpdateRemaining);
+
+$("#pos-collection-full").addEventListener("click", () => {
+  const target = posCollectionSelectedTarget();
+  if (!target) return;
+  $("#pos-collection-amount").value = (target.outstanding / 100).toFixed(2);
+  posCollectionUpdateRemaining();
+});
+
+$("#pos-collection-form").addEventListener("submit", submitPosCollection);
 
 $("#other-page").addEventListener("submit", async e => {
   const form = e.target, kind = form.dataset.form;
