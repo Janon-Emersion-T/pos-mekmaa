@@ -1003,7 +1003,7 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Supplier, _ = normalizeInvoiceText(req.Supplier)
 	req.InvoiceNumber, _ = normalizeInvoiceText(req.InvoiceNumber)
-	if req.Supplier == "" || req.InvoiceNumber == "" || len(req.Supplier) > 200 || len(req.InvoiceNumber) > 200 || len(req.Items) == 0 {
+	if req.Supplier == "" || len(req.Supplier) > 200 || len(req.InvoiceNumber) > 200 || len(req.Items) == 0 {
 		problem(w, 400, "Supplier, invoice number and items are required")
 		return
 	}
@@ -1018,10 +1018,14 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not load purchase currency")
 		return
 	}
-	invoiceID, err := resolveSupplierInvoice(r.Context(), tx, req.Supplier, req.InvoiceNumber, purchaseCurrency)
-	if err != nil {
-		problem(w, 500, "Could not resolve supplier invoice")
-		return
+	var invoiceID any
+	if req.InvoiceNumber != "" {
+		resolvedID, resolveErr := resolveSupplierInvoice(r.Context(), tx, req.Supplier, req.InvoiceNumber, purchaseCurrency)
+		if resolveErr != nil {
+			problem(w, 500, "Could not resolve supplier invoice")
+			return
+		}
+		invoiceID = resolvedID
 	}
 	total := 0
 	for _, x := range req.Items {
@@ -1035,6 +1039,18 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 	if err = tx.QueryRowContext(r.Context(), `INSERT INTO purchases(supplier,invoice_number,total,status,created_by,invoice_id) VALUES($1,$2,$3,'received',$4,$5) RETURNING id`, req.Supplier, req.InvoiceNumber, total, principal(r).ID, invoiceID).Scan(&id); err != nil {
 		problem(w, 500, "Could not save purchase")
 		return
+	}
+	if req.InvoiceNumber == "" {
+		_, supplierKey := normalizeInvoiceText(req.Supplier)
+		var legacyInvoiceID int64
+		if err = tx.QueryRowContext(r.Context(), `INSERT INTO supplier_invoices(supplier,invoice_number,supplier_key,invoice_key,currency,legacy_purchase_id) VALUES($1,'',$2,'',$3,$4) RETURNING id`, req.Supplier, supplierKey, purchaseCurrency, id).Scan(&legacyInvoiceID); err != nil {
+			problem(w, 500, "Could not create purchase invoice record")
+			return
+		}
+		if _, err = tx.ExecContext(r.Context(), `UPDATE purchases SET invoice_id=$1 WHERE id=$2`, legacyInvoiceID, id); err != nil {
+			problem(w, 500, "Could not link purchase invoice")
+			return
+		}
 	}
 	for _, x := range req.Items {
 		var productID int

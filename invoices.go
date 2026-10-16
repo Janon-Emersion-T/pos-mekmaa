@@ -23,7 +23,7 @@ func resolveSupplierInvoice(ctx context.Context, tx *sql.Tx, supplier, number, c
 	if supplier == "" || number == "" || currency == "" {
 		return 0, errors.New("supplier and invoice number are required")
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, supplierKey+"\x00"+numberKey+"\x00"+currency); err != nil {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, fmt.Sprintf("%d:%s%d:%s%d:%s", len(supplierKey), supplierKey, len(numberKey), numberKey, len(currency), currency)); err != nil {
 		return 0, err
 	}
 	var id int64
