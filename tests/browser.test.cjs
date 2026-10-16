@@ -116,10 +116,31 @@ test('supplier invoice details render and submit a partial payment', async t => 
   await page.getByRole('heading',{name:/Kenady.*ken001/}).waitFor();
   await page.locator('[data-form="invoice-payment"] [name="amount"]').fill('1000.00');
   await page.locator('[data-form="invoice-payment"] [name="reference"]').fill('PAY-001');
+  const formState = await page.locator('[data-form="invoice-payment"]').evaluate(form => ({
+    valid: form.checkValidity(),
+    fields: [...form.elements].map(el => ({
+      name: el.name,
+      type: el.type,
+      value: el.value,
+      required: el.required,
+      valid: el.validity.valid,
+      validationMessage: el.validationMessage
+    }))
+  }));
+  console.log('INVOICE PAYMENT FORM:', JSON.stringify(formState, null, 2));
+
   page.once('dialog', dialog => dialog.accept());
   await page.locator('[data-form="invoice-payment"] button').click();
-  await page.waitForFunction(() => performance.getEntriesByType('resource').some(x => x.name.includes('/api/invoices/4/payments')));
-  const request = requests.find(r=>r.path==='/api/invoices/4/payments');
+  await assert.doesNotReject(async () => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (requests.some(r => r.path === '/api/invoices/4/payments' && r.method === 'POST')) return;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('Invoice payment request was not sent. Browser errors: ' +
+      JSON.stringify(errors) + '; requests: ' +
+      JSON.stringify(requests.filter(r => r.path.includes('invoice'))));
+  });
+  const request = requests.find(r=>r.path==='/api/invoices/4/payments' && r.method==='POST');
   assert.equal(request.body.amount,100000);
   assert.equal(request.body.reference,'PAY-001');
   assert.deepEqual(errors,[]);
