@@ -19,6 +19,20 @@ func (s *Server) financialFundingSources(
 		problem(w, 500, "Could not initialize funding sources")
 		return
 	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		problem(w, 500, "Could not initialize cash account")
+		return
+	}
+	var currency string
+	if err = tx.QueryRowContext(r.Context(), `SELECT currency FROM store_settings WHERE id=1 FOR SHARE`).Scan(&currency); err == nil {
+		_, err = getOrCreateFinancialAccount(r.Context(), tx, "superadmin_cash", &actor.ID, currency)
+	}
+	if err != nil || tx.Commit() != nil {
+		tx.Rollback()
+		problem(w, 500, "Could not initialize cash account")
+		return
+	}
 
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id,user_id,account_type,currency,balance
@@ -27,9 +41,9 @@ func (s *Server) financialFundingSources(
             'investment_cash',
             'central_cash',
             'bank'
-        )
+		) OR (account_type='superadmin_cash' AND user_id=$1)
 		ORDER BY currency,account_type,id
-	`)
+	`, actor.ID)
 	if err != nil {
 		problem(w, 500, "Could not load funding sources")
 		return

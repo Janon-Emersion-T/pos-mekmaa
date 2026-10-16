@@ -1001,8 +1001,10 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Supplier) == "" || len(req.Items) == 0 {
-		problem(w, 400, "Supplier and items are required")
+	req.Supplier, _ = normalizeInvoiceText(req.Supplier)
+	req.InvoiceNumber, _ = normalizeInvoiceText(req.InvoiceNumber)
+	if req.Supplier == "" || req.InvoiceNumber == "" || len(req.Supplier) > 200 || len(req.InvoiceNumber) > 200 || len(req.Items) == 0 {
+		problem(w, 400, "Supplier, invoice number and items are required")
 		return
 	}
 	tx, hash := beginOperation(w, r, s, req.RequestID, "purchase", req)
@@ -1011,6 +1013,16 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var err error
+	var purchaseCurrency string
+	if err = tx.QueryRowContext(r.Context(), `SELECT currency FROM store_settings WHERE id=1 FOR SHARE`).Scan(&purchaseCurrency); err != nil {
+		problem(w, 500, "Could not load purchase currency")
+		return
+	}
+	invoiceID, err := resolveSupplierInvoice(r.Context(), tx, req.Supplier, req.InvoiceNumber, purchaseCurrency)
+	if err != nil {
+		problem(w, 500, "Could not resolve supplier invoice")
+		return
+	}
 	total := 0
 	for _, x := range req.Items {
 		if x.ProductID < 1 || x.Quantity < 1 || x.UnitCost < 0 {
@@ -1020,7 +1032,7 @@ func (s *Server) purchases(w http.ResponseWriter, r *http.Request) {
 		total += x.Quantity * x.UnitCost
 	}
 	var id int64
-	if err = tx.QueryRowContext(r.Context(), `INSERT INTO purchases(supplier,invoice_number,total,status,created_by) VALUES($1,$2,$3,'received',$4) RETURNING id`, req.Supplier, req.InvoiceNumber, total, principal(r).ID).Scan(&id); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `INSERT INTO purchases(supplier,invoice_number,total,status,created_by,invoice_id) VALUES($1,$2,$3,'received',$4,$5) RETURNING id`, req.Supplier, req.InvoiceNumber, total, principal(r).ID, invoiceID).Scan(&id); err != nil {
 		problem(w, 500, "Could not save purchase")
 		return
 	}
@@ -1527,6 +1539,7 @@ func (s *Server) routes() http.Handler {
 	s.cashHandoverRoutes(private)
 	s.capitalRoutes(private)
 	s.purchasePaymentRoutes(private)
+	s.invoiceRoutes(private)
 	private.Handle("GET /api/guest-refreshments", requireRoles(s.guestRefreshments, "superadmin", "admin"))
 	private.Handle("POST /api/guest-refreshments", requireRoles(s.guestRefreshments, "superadmin"))
 	private.Handle("PUT /api/settings/optimized-debts",
@@ -1562,7 +1575,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
-	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers", "/help", "/guest-refreshments"} {
+	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/invoices", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers", "/help", "/guest-refreshments"} {
 		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, sub, "index.html")
 		})

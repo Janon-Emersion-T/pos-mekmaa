@@ -156,8 +156,8 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(accounts) != 3 {
-		t.Fatalf("expected 3 funding sources, got %d", len(accounts))
+	if len(accounts) != 4 {
+		t.Fatalf("expected 4 funding sources, got %d", len(accounts))
 	}
 
 	found := map[string]int64{}
@@ -167,7 +167,8 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 
 	if found["central_cash"] != 5000 ||
 		found["investment_cash"] != 7500 ||
-		found["bank"] != 0 {
+		found["bank"] != 0 ||
+		found["superadmin_cash"] != 2500 {
 		t.Fatalf("incorrect authorized accounts: %+v", found)
 	}
 

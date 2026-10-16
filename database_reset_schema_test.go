@@ -23,8 +23,10 @@ func TestDatabaseResetIncludesAllTransactionalTables(t *testing.T) {
 		"profit_drawings",
 		"purchase_funding_allocations",
 		"purchase_payments",
+		"supplier_invoice_transactions",
+		"supplier_invoices",
 	} {
-		if !strings.Contains(code, "    "+table+",") {
+		if !strings.Contains(code, "    "+table+",") && !strings.Contains(code, "    "+table+"\n") {
 			t.Errorf("database reset is missing transactional table %q", table)
 		}
 	}

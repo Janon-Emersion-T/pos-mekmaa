@@ -291,7 +291,9 @@ func (s *Server) resetDatabase(w http.ResponseWriter, r *http.Request) {
     register_sessions,
     request_results,
     sale_items,
-    sales
+    sales,
+    supplier_invoice_transactions,
+    supplier_invoices
 RESTART IDENTITY`); err != nil {
 		problem(w, 500, "Could not reset database")
 		return

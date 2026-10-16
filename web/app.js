@@ -72,6 +72,8 @@ let products = [],
   productCategories = [],
   sales = [],
   purchases = [],
+  invoices = [],
+  invoiceDetail = null,
   petty = [],
   movements = [],
   openingAllocations = [],
@@ -96,12 +98,12 @@ let editingCategory = null;
 let pageRequest = 0;
 const pageTitles = {
   customers: "Customers", pos: "Point of sale", products: "Products", session: "Register session",
-  sales: "Sales history", inventory: "Inventory", purchases: "Purchases",
+  sales: "Sales history", inventory: "Inventory", purchases: "Purchases", invoices: "Supplier invoices",
   petty: "Petty cash", users: "Staff users", settings: "Settings", reports: "Daily report", audit: "Audit history", account: "Account", help: "Help & Documentation",
 };
 function canVisit(next) {
   if (!Object.hasOwn(pageTitles, next)) return false;
-  if (next === "users" || next === "audit") return currentUser?.role === "superadmin";
+  if (next === "users" || next === "audit" || next === "invoices") return currentUser?.role === "superadmin";
   return !["products","inventory","purchases","settings","reports"].includes(next) ||
     ["admin","superadmin"].includes(currentUser?.role);
 }
@@ -475,6 +477,12 @@ function renderOther() {
           )
           .join(""),
       );
+  } else if (page === "invoices") {
+    title = "Supplier invoices"; desc = "Consolidated supplier liabilities, payments, and cash refunds.";
+    const filters = new URLSearchParams(location.search);
+    body = `<form data-form="invoice-filter" class="mb-5 grid gap-3 rounded-xl border bg-white p-4 sm:grid-cols-3"><label class="text-xs">Search<input name="q" value="${escapeHTML(filters.get("q")||"")}" placeholder="Supplier or invoice" class="mt-2 h-11 w-full rounded-lg border px-3"></label><label class="text-xs">Status<select name="status" class="mt-2 h-11 w-full rounded-lg border px-3"><option value="">All</option>${["unpaid","partially_paid","paid"].map(x=>`<option value="${x}" ${filters.get("status")===x?"selected":""}>${x.replaceAll("_"," ")}</option>`).join("")}</select></label><button class="mt-5 h-11 rounded-lg bg-ink text-sm text-white">Filter invoices</button></form>` +
+      table(["Supplier","Invoice","Date","Purchases","Total","Paid","Refunded","Outstanding","Status",""], invoices.map(x=>`<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(x.supplier)}</td><td class="p-4">${escapeHTML(x.invoiceNumber||"—")}</td><td class="p-4">${new Date(x.date).toLocaleDateString()}</td><td class="p-4">${x.purchaseCount}</td><td class="p-4">${money(x.total,x.currency)}</td><td class="p-4">${money(x.paid,x.currency)}</td><td class="p-4">${money(x.refunded,x.currency)}</td><td class="p-4 font-semibold">${money(x.outstanding,x.currency)}</td><td class="p-4 capitalize">${escapeHTML(x.status.replaceAll("_"," "))}</td><td class="p-4"><a href="/invoices?id=${x.id}" data-page="invoices" class="text-orange-600">View details</a></td></tr>`).join(""));
+    if (invoiceDetail) body += invoiceDetailsView(invoiceDetail);
   } else if (page === "purchases") {
     title = "Purchases";
     desc =
@@ -525,7 +533,8 @@ async function loadPage() {
       renderOther();
       return;
     }
-    const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements"+location.search, purchases: "/api/purchases", petty: "/api/petty-cash", users: "/api/users" };
+    const invoiceId = new URLSearchParams(location.search).get("id");
+    const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements"+location.search, purchases: "/api/purchases", invoices: "/api/invoices"+(invoiceId?"":location.search), petty: "/api/petty-cash", users: "/api/users" };
     const needUsers = requestedPage === "users" || (requestedPage === "session" && currentUser?.role === "superadmin");
     const [savedSettings, savedProducts, savedSession, records, savedCategories, savedCustomers, savedAllocations, savedUsersForControls, savedFundingSources, savedReconciliations, savedCarryForwardOptions] = await Promise.all([
       api("/api/settings"), api("/api/products"), api("/api/session"),
@@ -573,6 +582,11 @@ async function loadPage() {
     }
     if (requestedPage === "inventory") movements = records;
     if (requestedPage === "purchases") purchases = records;
+    if (requestedPage === "invoices") {
+      invoices = records;
+      [invoiceDetail, fundingSources] = await Promise.all([invoiceId ? api("/api/invoices/"+encodeURIComponent(invoiceId)) : Promise.resolve(null), api("/api/financial/funding-sources")]);
+      if (request !== pageRequest) return;
+    }
     if (requestedPage === "petty") petty = records;
     renderProducts();
     renderCart();
@@ -893,6 +907,24 @@ $("#other-page").addEventListener("submit", async (e) => {
       } finally {
         button.disabled = false;
       }
+      return;
+    }
+    if (kind === "invoice-filter") {
+      const query = new URLSearchParams(Object.entries(data).filter(([,value]) => value));
+      await navigate("invoices", true, query.size ? "?"+query.toString() : "");
+      return;
+    }
+    if (kind === "invoice-payment" || kind === "invoice-refund") {
+      const amount = minorUnits(data.amount);
+      const limit = Number(kind === "invoice-payment" ? f.dataset.outstanding : f.dataset.refundable);
+      if (amount <= 0 || amount > limit) throw new Error(kind === "invoice-payment" ? "Payment exceeds the outstanding balance." : "Refund exceeds the previously paid refundable amount.");
+      if (!data.financialAccountId || !data.reference?.trim() || (kind === "invoice-refund" && !data.reason?.trim())) throw new Error("Account, amount and reference are required. Refunds also require a reason.");
+      const label = kind === "invoice-payment" ? "Pay" : "Refund";
+      if (!confirm(`${label} ${money(amount,f.dataset.currency)} ${kind === "invoice-payment" ? "to" : "from"} this supplier invoice?`)) return;
+      const endpoint = kind === "invoice-payment" ? "payments" : "refunds";
+      await api(`/api/invoices/${f.dataset.invoiceId}/${endpoint}`, jsonRequest({requestId:crypto.randomUUID(),financialAccountId:Number(data.financialAccountId),amount,fundingType:kind === "invoice-payment" ? data.fundingType : "",reference:data.reference.trim(),notes:(data.notes||"").trim(),reason:kind === "invoice-refund" ? data.reason.trim() : ""}));
+      toast(kind === "invoice-payment" ? "Supplier payment recorded" : "Supplier refund recorded");
+      await loadPage();
       return;
     }
     if (kind === "open-session")

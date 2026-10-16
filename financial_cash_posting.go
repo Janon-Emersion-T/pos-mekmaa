@@ -20,6 +20,8 @@ var financialCashEntryTypes = map[string]bool{
 	"petty_cash_out":           true,
 	"cash_refund":              true,
 	"opening_allocation":       true,
+	"supplier_invoice_payment": true,
+	"supplier_invoice_refund":  true,
 }
 
 func postFinancialCashMovement(

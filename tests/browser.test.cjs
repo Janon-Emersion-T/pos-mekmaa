@@ -50,6 +50,7 @@ async function setup(t, options = {}) {
       '/api/session':Object.hasOwn(options,'register') ? options.register : register, '/api/sessions':[], '/api/sales':[sale], '/api/sales/1':sale,
       '/api/inventory/movements':[], '/api/purchases':[], '/api/petty-cash':[], '/api/users':[],
       '/api/capital':[],
+      '/api/invoices':options.invoices || [],
       '/api/register-cash-allocations':[],
       '/api/register-cash-reconciliations':[],
       '/api/register-cash-carry-forward-options':[],
@@ -87,7 +88,7 @@ async function ready(page, route = '/pos') {
 test('menu starts and every management page renders without missing functions', async t => {
   const {page,errors} = await setup(t);
   await ready(page);
-  for (const route of ['customers','products','sales','reports','audit','account','session','inventory','purchases','petty','users','settings']) {
+  for (const route of ['customers','products','sales','reports','audit','account','session','inventory','purchases','invoices','petty','users','settings']) {
     await page.evaluate(route => navigate(route), route);
     assert.ok(await page.locator('#other-page h1').count(), `${route} did not render`);
     assert.doesNotMatch(await page.locator('#other-page').innerText(), /Could not load/);
@@ -102,6 +103,26 @@ test('menu starts and every management page renders without missing functions', 
     }
   }
   assert.deepEqual(errors, []);
+});
+test('supplier invoice details render and submit a partial payment', async t => {
+  const invoice = {id:4,supplier:'Kenady',invoiceNumber:'ken001',currency:'LKR',date:'2026-10-01T08:00:00Z',purchaseCount:2,total:2179200,paid:500000,refunded:0,outstanding:1679200,status:'partially_paid'};
+  const detail = {...invoice,purchases:[{id:10,createdAt:invoice.date,total:1000000,items:'2 × Ice Coffee @ 500000'}],transactions:[]};
+  const {page,errors,requests} = await setup(t,{invoices:[invoice],handle:async(route,pathname) => {
+    if (pathname === '/api/invoices/4') { await route.fulfill({json:detail}); return true; }
+    if (pathname === '/api/invoices/4/payments') { await route.fulfill({status:201,json:{id:8}}); return true; }
+    return false;
+  }});
+  await ready(page,'/invoices?id=4');
+  await page.getByRole('heading',{name:/Kenady.*ken001/}).waitFor();
+  await page.locator('[data-form="invoice-payment"] [name="amount"]').fill('1000.00');
+  await page.locator('[data-form="invoice-payment"] [name="reference"]').fill('PAY-001');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('[data-form="invoice-payment"] button').click();
+  await page.waitForFunction(() => performance.getEntriesByType('resource').some(x => x.name.includes('/api/invoices/4/payments')));
+  const request = requests.find(r=>r.path==='/api/invoices/4/payments');
+  assert.equal(request.body.amount,100000);
+  assert.equal(request.body.reference,'PAY-001');
+  assert.deepEqual(errors,[]);
 });
 test('superadmin reviews a partial cash handover with confirmation', async t => {
   const handover = {id:7,cashierId:2,cashierEmail:'cashier@example.test',currency:'LKR',requestedAmount:80000,approvedAmount:null,status:'pending',remarks:'Shift cash',reviewerEmail:'',decisionRemarks:'',sessionId:4,createdAt:'2026-09-25T09:00:00Z',reviewedAt:null};
