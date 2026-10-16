@@ -134,7 +134,11 @@ func TestDatabaseResetIntegration(t *testing.T) {
 
 	checkCount("SELECT COUNT(*) FROM customers WHERE is_owner=true", 1)
 	checkCount("SELECT COUNT(*) FROM customers", 1)
-	checkCount("SELECT COUNT(*) FROM financial_accounts", 0)
+	checkCount("SELECT COUNT(*) FROM financial_accounts", 3)
+	checkCount("SELECT COUNT(*) FROM financial_accounts WHERE balance=0 AND user_id IS NULL AND account_type IN ('central_cash','investment_cash','bank')", 3)
+	checkCount("SELECT COUNT(*) FROM financial_ledger_entries", 0)
+	checkCount("SELECT COUNT(*) FROM capital_entries", 0)
+	checkCount("SELECT COUNT(*) FROM register_cash_allocations", 0)
 	checkCount("SELECT COUNT(*) FROM customer_opening_balances", 0)
 	checkCount("SELECT COUNT(*) FROM customer_payments", 0)
 	checkCount("SELECT COUNT(*) FROM sales", 0)

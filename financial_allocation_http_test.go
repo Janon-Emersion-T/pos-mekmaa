@@ -79,8 +79,8 @@ func TestRegisterCashAllocationHTTPAuthorizationPostgres(t *testing.T) {
 
 	var sourceID int64
 	if err := db.QueryRow(`
-		INSERT INTO financial_accounts(account_type,currency,balance)
-		VALUES('central_cash',$1,500000)
+		UPDATE financial_accounts SET balance=500000
+		WHERE account_type='central_cash' AND currency=$1 AND user_id IS NULL
 		RETURNING id
 	`, currency).Scan(&sourceID); err != nil {
 		t.Fatal(err)

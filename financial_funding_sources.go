@@ -13,6 +13,12 @@ func (s *Server) financialFundingSources(
 		problem(w, http.StatusForbidden, "Superadmin access required")
 		return
 	}
+	// Self-heal installations that were reset by an older release, which
+	// truncated financial_accounts without recreating the funding sources.
+	if err := ensureFinancialAccounts(r.Context(), s.db); err != nil {
+		problem(w, 500, "Could not initialize funding sources")
+		return
+	}
 
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id,user_id,account_type,currency,balance

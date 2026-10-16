@@ -160,9 +160,9 @@ func openDB(ctx context.Context, url string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("create superadmin: %w", err)
 	}
-	if err = ensureInvestmentCashAccount(ctx, db); err != nil {
+	if err = ensureFinancialAccounts(ctx, db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("initialize investment cash: %w", err)
+		return nil, fmt.Errorf("initialize financial accounts: %w", err)
 	}
 	return db, nil
 }

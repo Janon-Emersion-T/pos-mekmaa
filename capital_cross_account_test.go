@@ -73,16 +73,16 @@ func TestCapitalCrossAccountConcurrencyPostgres(t *testing.T) {
 	var bankID, cashID int64
 
 	if err := db.QueryRow(`
-		INSERT INTO financial_accounts(account_type,currency,balance)
-		VALUES('bank',$1,0)
+		UPDATE financial_accounts SET balance=0
+		WHERE account_type='bank' AND currency=$1 AND user_id IS NULL
 		RETURNING id
 	`, currency).Scan(&bankID); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := db.QueryRow(`
-		INSERT INTO financial_accounts(account_type,currency,balance)
-		VALUES('central_cash',$1,0)
+		UPDATE financial_accounts SET balance=0
+		WHERE account_type='central_cash' AND currency=$1 AND user_id IS NULL
 		RETURNING id
 	`, currency).Scan(&cashID); err != nil {
 		t.Fatal(err)

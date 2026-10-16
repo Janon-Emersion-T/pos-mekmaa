@@ -67,8 +67,9 @@ func TestCapitalIdempotencyPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`
-		INSERT INTO financial_accounts(account_type,currency,balance)
-		VALUES('bank',$1,0) RETURNING id
+		UPDATE financial_accounts SET balance=0
+		WHERE account_type='bank' AND currency=$1 AND user_id IS NULL
+		RETURNING id
 	`, currency).Scan(&accountID); err != nil {
 		t.Fatal(err)
 	}

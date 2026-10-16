@@ -296,6 +296,10 @@ RESTART IDENTITY`); err != nil {
 		problem(w, 500, "Could not reset database")
 		return
 	}
+	if err = initializeFinancialAccounts(r.Context(), tx); err != nil {
+		problem(w, 500, "Could not initialize financial accounts")
+		return
+	}
 	// Restore the special Owner customer after clearing business data.
 	// Its new record has no opening balance, sales, payments or settlements.
 	if _, err = tx.ExecContext(r.Context(), `

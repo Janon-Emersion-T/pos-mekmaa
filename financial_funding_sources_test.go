@@ -86,11 +86,15 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Investment Cash already exists after database initialization.
+	// Business funding accounts already exist after database initialization.
 	if _, err := db.Exec(`
         UPDATE financial_accounts
-        SET balance=7500
-        WHERE account_type='investment_cash'
+        SET balance=CASE account_type
+            WHEN 'central_cash' THEN 5000
+            WHEN 'investment_cash' THEN 7500
+            WHEN 'bank' THEN 10000
+        END
+        WHERE account_type IN ('central_cash','investment_cash','bank')
           AND currency=$1
           AND user_id IS NULL
     `, currency); err != nil {
@@ -102,10 +106,8 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 		owner       any
 		balance     int64
 	}{
-		{"central_cash", nil, 5000},
 		{"superadmin_cash", adminID, 2500},
 		{"staff_cash", cashierID, 1800},
-		{"bank", nil, 10000},
 	} {
 		if _, err := db.Exec(`
 			INSERT INTO financial_accounts(
@@ -115,6 +117,12 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 		`, a.owner, a.accountType, currency, a.balance); err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	// Simulate an installation reset by an older build. The API must repair the
+	// missing zero-balance account before returning funding sources.
+	if _, err := db.Exec(`DELETE FROM financial_accounts WHERE account_type='bank' AND currency=$1`, currency); err != nil {
+		t.Fatal(err)
 	}
 
 	s := &Server{db: db}
@@ -159,7 +167,7 @@ func TestFinancialFundingSourcesPostgres(t *testing.T) {
 
 	if found["central_cash"] != 5000 ||
 		found["investment_cash"] != 7500 ||
-		found["bank"] != 10000 {
+		found["bank"] != 0 {
 		t.Fatalf("incorrect authorized accounts: %+v", found)
 	}
 
