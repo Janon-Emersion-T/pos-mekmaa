@@ -16,13 +16,14 @@ function assignedOpeningCash() {
 
 function assignedOpeningCashValue() {
   const assigned = assignedOpeningCash();
-  return assigned ? (assigned.amount / 100).toFixed(2) : "0.00";
+  const amount = assigned ? assigned.amount : (cashHandoverAccount.balance || 0);
+  return (amount / 100).toFixed(2);
 }
 
 function assignedCashNotice() {
   const assigned = assignedOpeningCash();
   if (currentUser?.role === "superadmin") return '<p class="mb-4 text-xs text-gray-500">Superadmins can open a register directly or assign opening cash to staff below.</p>';
-  if (!assigned) return '<p class="mb-4 rounded-lg bg-orange-50 p-3 text-xs text-orange-700">No opening cash has been assigned to you yet. Ask the superadmin before opening your register.</p>';
+  if (!assigned) return `<p class="mb-4 rounded-lg bg-green-50 p-3 text-xs text-green-700">Your current accountable cash of <strong>${money(cashHandoverAccount.balance || 0,cashHandoverAccount.currency || settings.currency)}</strong> will be used as the opening cash. No new Superadmin assignment is required.</p>`;
   return `<p class="mb-4 rounded-lg bg-green-50 p-3 text-xs text-green-700">Assigned opening cash: <strong>${money(assigned.amount,assigned.currency)}</strong>. Enter the exact same amount to start.</p>`;
 }
 

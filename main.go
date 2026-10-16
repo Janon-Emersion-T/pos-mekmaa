@@ -754,22 +754,44 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var allocationID *int64
+		usesAccountableCash := false
 		if principal(r).Role != "superadmin" {
 			var id int64
 			var amount int
-			if err = tx.QueryRowContext(r.Context(), `SELECT id,amount FROM register_cash_allocations WHERE user_id=$1 AND status='pending' AND currency=$2 ORDER BY id DESC LIMIT 1 FOR UPDATE`, principal(r).ID, currency).Scan(&id, &amount); errors.Is(err, sql.ErrNoRows) {
-				problem(w, 409, "Ask the superadmin to assign your opening cash before starting a register session")
-				return
-			}
-			if err != nil {
+			err = tx.QueryRowContext(r.Context(), `SELECT id,amount FROM register_cash_allocations WHERE user_id=$1 AND status='pending' AND currency=$2 ORDER BY id DESC LIMIT 1 FOR UPDATE`, principal(r).ID, currency).Scan(&id, &amount)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				problem(w, 500, "Could not read assigned opening cash")
 				return
 			}
-			if amount != req.OpeningCash {
-				problem(w, 409, "Opening cash must match the amount assigned by the superadmin")
-				return
+			if err == nil {
+				if amount != req.OpeningCash {
+					problem(w, 409, "Opening cash must match the amount assigned by the superadmin")
+					return
+				}
+				allocationID = &id
+			} else {
+				cashierID := principal(r).ID
+				account, accountErr := getOrCreateFinancialAccount(
+					r.Context(), tx, "staff_cash", &cashierID, currency,
+				)
+				if accountErr != nil {
+					problem(w, 500, "Could not load accountable cash")
+					return
+				}
+				if err = tx.QueryRowContext(r.Context(), `SELECT balance FROM financial_accounts WHERE id=$1 FOR UPDATE`, account.ID).Scan(&account.Balance); err != nil {
+					problem(w, 500, "Could not lock accountable cash")
+					return
+				}
+				if account.Balance < 0 {
+					problem(w, 409, "Accountable cash has a negative balance. Ask the superadmin to resolve it before opening a register.")
+					return
+				}
+				if int64(req.OpeningCash) != account.Balance {
+					problem(w, 409, "Opening cash must match your current accountable cash balance")
+					return
+				}
+				usesAccountableCash = true
 			}
-			allocationID = &id
 		}
 		if auditActor(r.Context(), tx, principal(r)) != nil {
 			problem(w, 500, "Could not record actor")
@@ -808,6 +830,24 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 				id, *allocationID,
 			); err != nil {
 				problem(w, 500, "Could not use assigned opening cash")
+				return
+			}
+		}
+		if usesAccountableCash {
+			// Pending handovers now belong to the newly opened cash session. This
+			// ensures a later approval reduces this session's expected cash once.
+			if _, err = tx.ExecContext(r.Context(), `
+				UPDATE financial_transfers
+				SET cash_session_id=$1
+				WHERE requested_by=$2
+				  AND status='pending'
+				  AND source_account_id=(
+				      SELECT id FROM financial_accounts
+				      WHERE account_type='staff_cash'
+				        AND user_id=$2 AND currency=$3
+				  )
+			`, id, principal(r).ID, currency); err != nil {
+				problem(w, 500, "Could not attach pending cash handovers to the register")
 				return
 			}
 		}

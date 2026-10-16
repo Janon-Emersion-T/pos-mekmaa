@@ -47,7 +47,7 @@ async function setup(t, options = {}) {
       '/api/customers':options.customers || [],
       '/api/customers/1':options.customerAccount || {customer:{id:1,name:'Jane'},sales:[],payments:[]},
       '/api/products':options.empty ? [] : [product], '/api/categories':[{id:1,name:'Drinks',productCount:1}],
-      '/api/session':register, '/api/sessions':[], '/api/sales':[sale], '/api/sales/1':sale,
+      '/api/session':Object.hasOwn(options,'register') ? options.register : register, '/api/sessions':[], '/api/sales':[sale], '/api/sales/1':sale,
       '/api/inventory/movements':[], '/api/purchases':[], '/api/petty-cash':[], '/api/users':[],
       '/api/capital':[],
       '/api/register-cash-allocations':[],
@@ -134,6 +134,20 @@ test('cashier renders accountable cash and submits a handover request', async t 
   const request = requests.find(r=>r.path==='/api/cash-handovers' && r.method==='POST');
   assert.equal(request.body.amount,50000);
   assert.match(request.body.requestId,/^[a-zA-Z0-9_-]{16,100}$/);
+  assert.deepEqual(errors,[]);
+});
+test('cashier accountable balance prefills the next register opening', async t => {
+  const {page,errors,requests} = await setup(t,{role:'cashier',register:null,handle:async(route,pathname) => {
+    if (pathname !== '/api/session/open') return false;
+    await route.fulfill({status:201,json:{id:2}});
+    return true;
+  }});
+  await ready(page,'/session');
+  assert.equal(await page.locator('[data-form="open-session"] [name="openingCash"]').inputValue(),'1000.00');
+  assert.match(await page.locator('[data-form="open-session"]').innerText(),/No new Superadmin assignment is required/);
+  await page.locator('[data-form="open-session"] button').click();
+  const request = requests.find(r=>r.path==='/api/session/open' && r.method==='POST');
+  assert.deepEqual(request.body,{openingCash:100000});
   assert.deepEqual(errors,[]);
 });
 test('new catalogs render an empty menu', async t => {

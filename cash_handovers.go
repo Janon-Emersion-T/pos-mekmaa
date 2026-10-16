@@ -161,8 +161,8 @@ func (s *Server) cashHandovers(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	if err = tx.QueryRowContext(r.Context(), `
-		INSERT INTO financial_transfers(source_account_id,destination_account_id,requested_amount,status,remarks,requested_by,session_id,request_id)
-		VALUES($1,$2,$3,'pending',$4,$5,$6,$7) RETURNING id`, source.ID, destination.ID, req.Amount, req.Remarks, actor.ID, sessionID, req.RequestID).Scan(&id); err != nil {
+		INSERT INTO financial_transfers(source_account_id,destination_account_id,requested_amount,status,remarks,requested_by,session_id,cash_session_id,request_id)
+		VALUES($1,$2,$3,'pending',$4,$5,$6,$6,$7) RETURNING id`, source.ID, destination.ID, req.Amount, req.Remarks, actor.ID, sessionID, req.RequestID).Scan(&id); err != nil {
 		problem(w, 409, "Cash handover request already exists")
 		return
 	}

@@ -16,6 +16,7 @@ type FinancialTransferRequest struct {
 	Status               string
 	Remarks              string
 	SessionID            sql.NullInt64
+	CashSessionID        sql.NullInt64
 }
 
 func requestFinancialTransfer(
@@ -151,7 +152,7 @@ func reviewFinancialTransfer(
 	err = tx.QueryRowContext(ctx, `
 		SELECT id,source_account_id,
 		       destination_account_id,
-		       requested_amount,status,session_id
+		       requested_amount,status,session_id,cash_session_id
 		FROM financial_transfers
 		WHERE id=$1
 		FOR UPDATE
@@ -162,6 +163,7 @@ func reviewFinancialTransfer(
 		&req.RequestedAmount,
 		&req.Status,
 		&req.SessionID,
+		&req.CashSessionID,
 	)
 
 	if err != nil {
@@ -176,10 +178,10 @@ func reviewFinancialTransfer(
 	// close is part of that session's expected cash; one committed afterwards is
 	// reflected by the reconciliation ledger snapshot instead.
 	affectsSessionCash := false
-	if req.SessionID.Valid {
+	if req.CashSessionID.Valid {
 		var ignored int64
 		var sessionStatus string
-		if err = tx.QueryRowContext(ctx, `SELECT id,status FROM register_sessions WHERE id=$1 FOR UPDATE`, req.SessionID.Int64).Scan(&ignored, &sessionStatus); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT id,status FROM register_sessions WHERE id=$1 FOR UPDATE`, req.CashSessionID.Int64).Scan(&ignored, &sessionStatus); err != nil {
 			return err
 		}
 		affectsSessionCash = approve && sessionStatus == "open"
