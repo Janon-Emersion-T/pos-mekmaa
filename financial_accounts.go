@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
+	"time"
 )
 
 type FinancialAccount struct {
@@ -13,6 +15,50 @@ type FinancialAccount struct {
 	AccountType string `json:"accountType"`
 	Currency    string `json:"currency"`
 	Balance     int64  `json:"balance"`
+}
+
+type FinancialAccountBalance struct {
+	ID          int64     `json:"id"`
+	UserID      *int64    `json:"userId"`
+	OwnerEmail  string    `json:"ownerEmail"`
+	OwnerRole   string    `json:"ownerRole"`
+	AccountType string    `json:"accountType"`
+	Currency    string    `json:"currency"`
+	Balance     int64     `json:"balance"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+func (s *Server) financialAccountBalances(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.QueryContext(r.Context(), `
+		SELECT a.id,a.user_id,COALESCE(u.email,''),COALESCE(u.role,''),
+		       a.account_type,a.currency,a.balance,a.updated_at
+		FROM financial_accounts a
+		LEFT JOIN users u ON u.id=a.user_id
+		ORDER BY CASE a.account_type
+		  WHEN 'central_cash' THEN 1 WHEN 'investment_cash' THEN 2
+		  WHEN 'bank' THEN 3 WHEN 'superadmin_cash' THEN 4 ELSE 5 END,
+		  lower(COALESCE(u.email,'')),a.currency,a.id`)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "Could not load account balances")
+		return
+	}
+	defer rows.Close()
+	out := []FinancialAccountBalance{}
+	for rows.Next() {
+		var balance FinancialAccountBalance
+		if err = rows.Scan(&balance.ID, &balance.UserID, &balance.OwnerEmail,
+			&balance.OwnerRole, &balance.AccountType, &balance.Currency,
+			&balance.Balance, &balance.UpdatedAt); err != nil {
+			problem(w, http.StatusInternalServerError, "Could not read account balances")
+			return
+		}
+		out = append(out, balance)
+	}
+	if err = rows.Err(); err != nil {
+		problem(w, http.StatusInternalServerError, "Could not read account balances")
+		return
+	}
+	respond(w, http.StatusOK, out)
 }
 
 func getOrCreateFinancialAccount(

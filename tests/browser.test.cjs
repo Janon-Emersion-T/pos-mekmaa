@@ -72,7 +72,12 @@ async function setup(t, options = {}) {
           balance:250000
         }
       ],
-      '/api/reports/daily':{date:'2026-09-25',timezone:'Asia/Colombo',rows:[]}, '/api/audit':[],
+      '/api/reports/daily':{date:'2026-09-25',from:'2026-09-25',to:'2026-09-25',timezone:'Asia/Colombo',rows:[]},
+      '/api/financial/balances':[
+        {id:10,userId:null,ownerEmail:'',ownerRole:'',accountType:'central_cash',currency:'LKR',balance:500000,updatedAt:'2026-09-25T10:00:00Z'},
+        {id:11,userId:1,ownerEmail:'test@example.test',ownerRole:'superadmin',accountType:'superadmin_cash',currency:'LKR',balance:250000,updatedAt:'2026-09-25T10:00:00Z'}
+      ],
+      '/api/audit':[],
       '/api/checkout':sale, '/api/auth/password':{ok:true},
     };
     if (!(pathname in responses)) { errors.push(`Unexpected API: ${pathname}`); await route.fulfill({status:404,json:{error:'Unknown API'}}); return; }
@@ -88,7 +93,7 @@ async function ready(page, route = '/pos') {
 test('menu starts and every management page renders without missing functions', async t => {
   const {page,errors} = await setup(t);
   await ready(page);
-  for (const route of ['customers','products','sales','reports','audit','account','session','inventory','purchases','invoices','petty','users','settings']) {
+  for (const route of ['customers','products','sales','reports','balances','audit','account','session','inventory','purchases','invoices','petty','users','settings']) {
     await page.evaluate(route => navigate(route), route);
     assert.ok(await page.locator('#other-page h1').count(), `${route} did not render`);
     assert.doesNotMatch(await page.locator('#other-page').innerText(), /Could not load/);

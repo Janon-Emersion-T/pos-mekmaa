@@ -99,11 +99,11 @@ let pageRequest = 0;
 const pageTitles = {
   customers: "Customers", pos: "Point of sale", products: "Products", session: "Register session",
   sales: "Sales history", inventory: "Inventory", purchases: "Purchases", invoices: "Supplier invoices",
-  petty: "Petty cash", users: "Staff users", settings: "Settings", reports: "Daily report", audit: "Audit history", account: "Account", help: "Help & Documentation",
+  petty: "Petty cash", users: "Staff users", balances: "Account balances", settings: "Settings", reports: "Report", audit: "Audit history", account: "Account", help: "Help & Documentation",
 };
 function canVisit(next) {
   if (!Object.hasOwn(pageTitles, next)) return false;
-  if (next === "users" || next === "audit" || next === "invoices") return currentUser?.role === "superadmin";
+  if (next === "users" || next === "balances" || next === "audit" || next === "invoices") return currentUser?.role === "superadmin";
   return !["products","inventory","purchases","settings","reports"].includes(next) ||
     ["admin","superadmin"].includes(currentUser?.role);
 }
@@ -407,8 +407,11 @@ function renderOther() {
     title = "Sales history"; desc = "Search sales, reprint receipts, and track returns.";
     body = salesHistoryView();
   } else if (page === "reports") {
-    title = "Daily closing report"; desc = "Sales, refunds, cash movements, and register differences by currency.";
+    title = "Closing report"; desc = "Sales, refunds, cash movements, and register differences for a selected date range.";
     body = dailyReportView();
+  } else if (page === "balances") {
+    title = "Account balances"; desc = "Current balance of every business and staff financial account. Only superadmins can access this page.";
+    body = accountBalancesView();
   } else if (page === "audit") {
     title = "Audit history"; desc = "Staff actions and before/after changes. Only superadmins can access this history.";
     body = auditView();
@@ -534,7 +537,7 @@ async function loadPage() {
       return;
     }
     const invoiceId = new URLSearchParams(location.search).get("id");
-    const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements"+location.search, purchases: "/api/purchases", invoices: "/api/invoices"+(invoiceId?"":location.search), petty: "/api/petty-cash", users: "/api/users" };
+    const endpoints = { customers: customerId ? "/api/customers/"+encodeURIComponent(customerId) : null, reports: "/api/reports/daily"+location.search, balances: "/api/financial/balances", audit: "/api/audit"+location.search, session: "/api/sessions", sales: "/api/sales" + salesQuery(), inventory: "/api/inventory/movements"+location.search, purchases: "/api/purchases", invoices: "/api/invoices"+(invoiceId?"":location.search), petty: "/api/petty-cash", users: "/api/users" };
     const needUsers = requestedPage === "users" || (requestedPage === "session" && currentUser?.role === "superadmin");
     const [savedSettings, savedProducts, savedSession, records, savedCategories, savedCustomers, savedAllocations, savedUsersForControls, savedFundingSources, savedReconciliations, savedCarryForwardOptions] = await Promise.all([
       api("/api/settings"), api("/api/products"), api("/api/session"),
@@ -565,6 +568,7 @@ async function loadPage() {
     session = savedSession;
     if (requestedPage === "sales") sales = records;
     if (requestedPage === "reports") reportData = records;
+    if (requestedPage === "balances") accountBalances = records;
     if (requestedPage === "audit") auditData = records;
     if (requestedPage === "session") {
       sessionHistory = records;

@@ -27,11 +27,21 @@ type DailyRow struct {
 }
 
 func (s *Server) dailyReport(w http.ResponseWriter, r *http.Request) {
-	day := r.URL.Query().Get("date")
-	if day == "" {
-		day = time.Now().In(businessLocation()).Format("2006-01-02")
+	q := r.URL.Query()
+	fromDay, toDay := q.Get("from"), q.Get("to")
+	// Keep the old date parameter working for bookmarks and existing clients.
+	if day := q.Get("date"); day != "" && fromDay == "" && toDay == "" {
+		fromDay, toDay = day, day
 	}
-	from, to, err := dateBounds(day, day)
+	if fromDay == "" && toDay == "" {
+		fromDay = time.Now().In(businessLocation()).Format("2006-01-02")
+		toDay = fromDay
+	} else if fromDay == "" {
+		fromDay = toDay
+	} else if toDay == "" {
+		toDay = fromDay
+	}
+	from, to, err := dateBounds(fromDay, toDay)
 	if err != nil {
 		problem(w, 400, "Invalid report date")
 		return
@@ -63,18 +73,22 @@ func (s *Server) dailyReport(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "Could not read report")
 		return
 	}
-	if r.URL.Query().Get("format") == "csv" {
+	if q.Get("format") == "csv" {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-		w.Header().Set("Content-Disposition", `attachment; filename="closing-`+day+`.csv"`)
+		filename := "closing-" + fromDay
+		if toDay != fromDay {
+			filename += "-to-" + toDay
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`.csv"`)
 		c := csv.NewWriter(w)
 		defer c.Flush()
 		c.Write([]string{"date", "timezone", "currency", "sales", "cash_sales", "card_sales", "cash_refunds", "card_refunds", "net_sales", "petty_in", "petty_out", "net_cash_movement", "closed_registers", "closing_difference", "credit_sales", "cash_collections", "card_collections", "debt_cancelled"})
 		for _, x := range out {
-			c.Write([]string{day, businessLocation().String(), x.Currency, strconv.Itoa(x.SaleCount), decimalAmount(x.CashSales), decimalAmount(x.CardSales), decimalAmount(x.CashRefunds), decimalAmount(x.CardRefunds), decimalAmount(x.CashSales + x.CardSales + x.CreditSales - x.CashRefunds - x.CardRefunds - x.CreditReturns), decimalAmount(x.PettyIn), decimalAmount(x.PettyOut), decimalAmount(x.CashSales + x.CashCollections - x.CashRefunds + x.PettyIn - x.PettyOut), strconv.Itoa(x.ClosedSessions), decimalAmount(x.ClosingDifference), decimalAmount(x.CreditSales), decimalAmount(x.CashCollections), decimalAmount(x.CardCollections), decimalAmount(x.CreditReturns)})
+			c.Write([]string{fromDay + " to " + toDay, businessLocation().String(), x.Currency, strconv.Itoa(x.SaleCount), decimalAmount(x.CashSales), decimalAmount(x.CardSales), decimalAmount(x.CashRefunds), decimalAmount(x.CardRefunds), decimalAmount(x.CashSales + x.CardSales + x.CreditSales - x.CashRefunds - x.CardRefunds - x.CreditReturns), decimalAmount(x.PettyIn), decimalAmount(x.PettyOut), decimalAmount(x.CashSales + x.CashCollections - x.CashRefunds + x.PettyIn - x.PettyOut), strconv.Itoa(x.ClosedSessions), decimalAmount(x.ClosingDifference), decimalAmount(x.CreditSales), decimalAmount(x.CashCollections), decimalAmount(x.CardCollections), decimalAmount(x.CreditReturns)})
 		}
 		return
 	}
-	respond(w, 200, map[string]any{"date": day, "timezone": businessLocation().String(), "rows": out})
+	respond(w, 200, map[string]any{"date": fromDay, "from": fromDay, "to": toDay, "timezone": businessLocation().String(), "rows": out})
 }
 func decimalAmount(n int) string { return fmt.Sprintf("%.2f", float64(n)/100) }
 func (s *Server) auditHistory(w http.ResponseWriter, r *http.Request) {

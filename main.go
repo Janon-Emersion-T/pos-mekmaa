@@ -1653,11 +1653,12 @@ func (s *Server) routes() http.Handler {
 	private.Handle("GET /api/inventory/movements", requireRoles(s.inventory, "superadmin", "admin"))
 	private.Handle("POST /api/inventory/adjustments", requireRoles(s.inventory, "superadmin", "admin"))
 	private.Handle("GET /api/users", requireRoles(s.users, "superadmin"))
+	private.Handle("GET /api/financial/balances", requireRoles(s.financialAccountBalances, "superadmin"))
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	private.Handle("POST /api/users/{id}/temporary-password", requireRoles(s.generateUserTemporaryPassword, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
-	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/invoices", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers", "/help", "/guest-refreshments"} {
+	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/invoices", "/petty", "/users", "/balances", "/settings", "/reports", "/audit", "/account", "/customers", "/help", "/guest-refreshments"} {
 		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, sub, "index.html")
 		})

@@ -1,5 +1,5 @@
 // Companion functions for the catalog, register, and management screens.
-let reportData = { rows: [] }, auditData = [];
+let reportData = { rows: [] }, auditData = [], accountBalances = [];
 const jsonRequest = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 const pendingKey = () => `counter.pending-checkout.${currentUser.id}`;
 const refundKey = () => `counter.pending-refund.${currentUser.id}`;
@@ -41,8 +41,12 @@ function salesHistoryView() {
 }
 function dailyReportView() {
   const csv = new URLSearchParams(location.search); csv.set("format", "csv");
-  return filterForm("report-filter", filterInput("Report date", "date", "date")) + `<p class="mb-4 text-xs text-gray-500">${escapeHTML(reportData.date)} · ${escapeHTML(reportData.timezone)}</p><a href="/api/reports/daily?${escapeHTML(csv.toString())}" class="text-sm text-orange-600">Download CSV</a>` +
+  return filterForm("report-filter", filterInput("From", "from", "date") + filterInput("To", "to", "date")) + `<p class="mb-4 text-xs text-gray-500">${escapeHTML(reportData.from)}${reportData.to !== reportData.from ? ` to ${escapeHTML(reportData.to)}` : ""} · ${escapeHTML(reportData.timezone)}</p><a href="/api/reports/daily?${escapeHTML(csv.toString())}" class="text-sm text-orange-600">Download CSV</a>` +
     table(["Currency", "Sales", "Cash sales", "Card sales", "Credit sales", "Cash collected on credit", "Card collected on credit", "Money refunded", "Debt cancelled", "Net sales", "Petty cash in", "Petty cash out", "Closing difference"], reportData.rows.map(r => `<tr class="border-b">${[escapeHTML(r.currency), r.saleCount, money(r.cashSales,r.currency), money(r.cardSales,r.currency), money(r.creditSales || 0,r.currency), money(r.cashCollections || 0,r.currency), money(r.cardCollections || 0,r.currency), money(r.cashRefunds+r.cardRefunds,r.currency), money(r.creditReturns || 0,r.currency), money(r.cashSales+r.cardSales+(r.creditSales || 0)-r.cashRefunds-r.cardRefunds-(r.creditReturns || 0),r.currency), money(r.pettyIn,r.currency), money(r.pettyOut,r.currency), money(r.closingDifference,r.currency)].map(v=>`<td class="p-4">${v}</td>`).join("")}</tr>`).join(""));
+}
+function accountBalancesView() {
+  const labels = {staff_cash:"Staff cash",superadmin_cash:"Superadmin cash",central_cash:"Central cash",investment_cash:"Investment cash",bank:"Bank"};
+  return table(["Account", "Owner", "Role", "Currency", "Balance", "Last updated"], accountBalances.map(a => `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(labels[a.accountType] || a.accountType)}</td><td class="p-4">${escapeHTML(a.ownerEmail || "Business")}</td><td class="p-4 capitalize">${escapeHTML(a.ownerRole || "—")}</td><td class="p-4">${escapeHTML(a.currency)}</td><td class="p-4 font-semibold">${money(a.balance,a.currency)}</td><td class="p-4">${new Date(a.updatedAt).toLocaleString()}</td></tr>`).join(""));
 }
 function auditView() {
   return filterForm("audit-filter", filterInput("Entity", "entity") + filterInput("Staff email", "actor")) +
