@@ -104,6 +104,30 @@ test('menu starts and every management page renders without missing functions', 
   }
   assert.deepEqual(errors, []);
 });
+test('superadmin can generate a one-time temporary password for a staff user', async t => {
+  const {page,errors,requests} = await setup(t,{handle:async(route,pathname) => {
+    if (pathname === '/api/users' && route.request().method() === 'GET') {
+      await route.fulfill({json:[{id:2,email:'cashier@example.test',role:'cashier',active:true,createdAt:'2026-10-01T00:00:00Z'}]});
+      return true;
+    }
+    if (pathname === '/api/users/2/temporary-password') {
+      await route.fulfill({json:{temporaryPassword:'Temp@Pass2026'}});
+      return true;
+    }
+    return false;
+  }});
+  await ready(page,'/users');
+  let dialogCount = 0;
+  const prompt = new Promise(resolve => page.on('dialog',async dialog=>{
+    dialogCount++;
+    if (dialogCount === 1) await dialog.accept();
+    else { resolve(dialog.defaultValue()); await dialog.dismiss(); }
+  }));
+  await page.getByRole('button',{name:'Generate temporary password'}).click();
+  assert.equal(await prompt,'Temp@Pass2026');
+  assert.ok(requests.some(r=>r.path==='/api/users/2/temporary-password' && r.method==='POST'));
+  assert.deepEqual(errors,[]);
+});
 test('supplier invoice details render and submit a partial payment', async t => {
   const invoice = {id:4,supplier:'Kenady',invoiceNumber:'ken001',currency:'LKR',date:'2026-10-01T08:00:00Z',purchaseCount:2,total:2179200,paid:500000,refunded:0,outstanding:1679200,status:'partially_paid'};
   const detail = {...invoice,purchases:[{id:10,createdAt:invoice.date,total:1000000,items:'2 × Ice Coffee @ 500000'}],transactions:[]};

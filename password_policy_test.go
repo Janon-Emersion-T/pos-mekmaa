@@ -23,3 +23,15 @@ func TestPasswordComplexity(t *testing.T) {
 		}
 	}
 }
+
+func TestGeneratedTemporaryPasswordMeetsPolicy(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		password, err := generateTemporaryPassword()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(password) != 16 || !validPassword(password) {
+			t.Fatalf("generated password does not meet policy: %q", password)
+		}
+	}
+}

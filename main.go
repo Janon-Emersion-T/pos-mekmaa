@@ -135,6 +135,28 @@ func validPassword(password string) bool {
 	return letter && digit && special
 }
 
+const temporaryPasswordAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%"
+
+func generateTemporaryPassword() (string, error) {
+	password := []byte{'A', 'a', '2', '!'}
+	for len(password) < 16 {
+		var pick [1]byte
+		if _, err := rand.Read(pick[:]); err != nil {
+			return "", err
+		}
+		password = append(password, temporaryPasswordAlphabet[int(pick[0])%len(temporaryPasswordAlphabet)])
+	}
+	for i := len(password) - 1; i > 0; i-- {
+		var pick [1]byte
+		if _, err := rand.Read(pick[:]); err != nil {
+			return "", err
+		}
+		j := int(pick[0]) % (i + 1)
+		password[i], password[j] = password[j], password[i]
+	}
+	return string(password), nil
+}
+
 type Server struct {
 	db            *sql.DB
 	secureCookies bool
@@ -1543,6 +1565,49 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, 200, map[string]bool{"ok": true})
 }
+
+func (s *Server) generateUserTemporaryPassword(w http.ResponseWriter, r *http.Request) {
+	idText := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/users/"), "/temporary-password")
+	id, err := strconv.ParseInt(idText, 10, 64)
+	if err != nil || id < 1 {
+		problem(w, 400, "Invalid user")
+		return
+	}
+	temporaryPassword, err := generateTemporaryPassword()
+	if err != nil {
+		problem(w, 500, "Could not generate temporary password")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(temporaryPassword), bcrypt.DefaultCost)
+	if err != nil {
+		problem(w, 500, "Could not secure temporary password")
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		problem(w, 500, "Could not reset password")
+		return
+	}
+	defer tx.Rollback()
+	if err = auditActor(r.Context(), tx, principal(r)); err != nil {
+		problem(w, 500, "Could not record actor")
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), `UPDATE users SET password_hash=$1,must_change_password=true WHERE id=$2`, string(hash), id)
+	if err != nil {
+		problem(w, 500, "Could not reset password")
+		return
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		problem(w, 404, "User not found")
+		return
+	}
+	if _, err = tx.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE user_id=$1`, id); err != nil || tx.Commit() != nil {
+		problem(w, 500, "Could not reset password")
+		return
+	}
+	respond(w, 200, map[string]string{"temporaryPassword": temporaryPassword})
+}
 func (s *Server) routes() http.Handler {
 	private := http.NewServeMux()
 	private.HandleFunc("GET /api/auth/me", s.me)
@@ -1590,6 +1655,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("GET /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
+	private.Handle("POST /api/users/{id}/temporary-password", requireRoles(s.generateUserTemporaryPassword, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
 	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/invoices", "/petty", "/users", "/settings", "/reports", "/audit", "/account", "/customers", "/help", "/guest-refreshments"} {
 		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {

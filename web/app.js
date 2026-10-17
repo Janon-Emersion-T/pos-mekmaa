@@ -399,7 +399,7 @@ function renderOther() {
         users
           .map(
             (u) =>
-              `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(u.email)}</td><td class="p-4 capitalize">${escapeHTML(u.role)}</td><td class="p-4"><span class="rounded-full px-2 py-1 ${u.active ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}">${u.active ? "Active" : "Disabled"}</span></td><td class="p-4">${new Date(u.createdAt).toLocaleDateString()}</td><td class="p-4">${u.id === currentUser.id ? '<span class="text-gray-400">Current user</span>' : `<button data-user-toggle="${u.id}" data-active="${!u.active}" class="text-orange-600">${u.active ? "Disable" : "Enable"}</button>`}</td></tr>`,
+              `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(u.email)}</td><td class="p-4 capitalize">${escapeHTML(u.role)}</td><td class="p-4"><span class="rounded-full px-2 py-1 ${u.active ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-500"}">${u.active ? "Active" : "Disabled"}</span></td><td class="p-4">${new Date(u.createdAt).toLocaleDateString()}</td><td class="p-4"><div class="flex flex-wrap gap-3">${u.id === currentUser.id ? '<span class="text-gray-400">Current user</span>' : `<button data-user-toggle="${u.id}" data-active="${!u.active}" class="text-orange-600">${u.active ? "Disable" : "Enable"}</button><button data-user-temp-password="${u.id}" data-user-email="${escapeHTML(u.email)}" class="text-orange-600">Generate temporary password</button>`}</div></td></tr>`,
           )
           .join(""),
       );
@@ -765,6 +765,18 @@ document.addEventListener("click", async (e) => {
     } catch (err) {
       toast(err.message);
     }
+  }
+  const temporaryPassword = e.target.closest("[data-user-temp-password]");
+  if (temporaryPassword) {
+    const email = temporaryPassword.dataset.userEmail;
+    if (!window.confirm(`Generate a new temporary password for ${email}? Their current password and all signed-in sessions will stop working.`)) return;
+    temporaryPassword.disabled = true;
+    try {
+      const result = await api(`/api/users/${temporaryPassword.dataset.userTempPassword}/temporary-password`, { method: "POST" });
+      window.prompt(`Temporary password for ${email}\n\nCopy it now. It will not be shown again, and the user must change it after signing in.`, result.temporaryPassword);
+      toast("Temporary password generated");
+    } catch (err) { toast(err.message); }
+    finally { temporaryPassword.disabled = false; }
   }
   if (pay && !busy && !pendingCheckout) {
     if (ownerSelected() && pay.dataset.payment !== "credit") {
