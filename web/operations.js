@@ -126,10 +126,22 @@ document.addEventListener("submit", async event => {
       localStorage.setItem(key, JSON.stringify(request));
     }
 
-    await api("/api/financial/superadmin-transfer", jsonRequest(request));
-    localStorage.removeItem(key);
+    const result = await api("/api/financial/superadmin-transfer", jsonRequest(request));
+
+    // Verify the server's balances before reporting success.
+    const balances = await api("/api/financial/balances");
+    const source = balances.find(a => a.id === request.sourceAccountId);
+    const destination = balances.find(a => a.id === request.destinationAccountId);
+
+    if (!source || !destination) {
+      throw Error("Transfer response received but balances could not be verified. Do not submit again.");
+    }
+
+    accountBalances = balances;
     await loadPage();
-    toast("Transfer completed or previous transfer confirmed");
+    localStorage.removeItem(key);
+
+    toast(`Transfer #${result.id} confirmed. ${source.ownerEmail}: ${money(source.balance, source.currency)}; ${destination.ownerEmail}: ${money(destination.balance, destination.currency)}`);
   } catch (error) {
     // Retain the pending request if the result is uncertain.
     toast(error.message);
