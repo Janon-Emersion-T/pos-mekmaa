@@ -841,7 +841,7 @@ $("#other-page").addEventListener("submit", async (e) => {
   const f = e.target,
     data = Object.fromEntries(new FormData(f)),
     kind = f.dataset.form;
-  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","capital-contribution","database-reset","reconciliation-review","cash-handover-review"].includes(kind)) return;
+  if (["sale-filter","report-filter","audit-filter","inventory-filter","password","customer","customer-filter","customer-payment","credit-policy","opening-correction","payment-reversal","admin-close","cash-allocation","capital-contribution","database-reset","reconciliation-review","cash-handover-review","superadmin-transfer"].includes(kind)) return;
   if (f.dataset.saving) return;
   f.dataset.saving = "true";
   const submit = f.querySelector('button:not([type="button"])');
