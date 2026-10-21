@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"os"
 	"testing"
 )
@@ -13,7 +15,7 @@ func TestSuperadminTransferDatabaseSchema(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not configured")
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
