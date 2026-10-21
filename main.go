@@ -1654,6 +1654,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("POST /api/inventory/adjustments", requireRoles(s.inventory, "superadmin", "admin"))
 	private.Handle("GET /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("GET /api/financial/balances", requireRoles(s.financialAccountBalances, "superadmin"))
+	private.Handle("POST /api/financial/superadmin-transfer", requireRoles(s.superadminCashTransfer, "superadmin"))
 	private.Handle("POST /api/users", requireRoles(s.users, "superadmin"))
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	private.Handle("POST /api/users/{id}/temporary-password", requireRoles(s.generateUserTemporaryPassword, "superadmin"))

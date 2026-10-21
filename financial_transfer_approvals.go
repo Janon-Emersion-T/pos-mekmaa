@@ -174,6 +174,18 @@ func reviewFinancialTransfer(
 		return errors.New("transfer request already reviewed")
 	}
 
+	// This review workflow is exclusively for staff cash handovers.
+	var sourceType string
+	if err = tx.QueryRowContext(ctx,
+		`SELECT account_type FROM financial_accounts WHERE id=$1`,
+		req.SourceAccountID,
+	).Scan(&sourceType); err != nil {
+		return err
+	}
+	if sourceType != "staff_cash" {
+		return errors.New("only staff cash handovers can be reviewed here")
+	}
+
 	// Serialize reviews with session closing. An approval committed before the
 	// close is part of that session's expected cash; one committed afterwards is
 	// reflected by the reconciliation ledger snapshot instead.

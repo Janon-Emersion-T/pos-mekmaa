@@ -43,7 +43,13 @@ func (s *Server) cashHandovers(w http.ResponseWriter, r *http.Request) {
 	actor := principal(r)
 	if r.Method == http.MethodGet {
 		rows, err := s.db.QueryContext(r.Context(), cashHandoverSelect+`
-			WHERE t.requested_by=$1 ORDER BY t.created_at DESC LIMIT 200`, actor.ID)
+			WHERE t.requested_by=$1
+              AND EXISTS (
+                SELECT 1 FROM financial_accounts src
+                WHERE src.id=t.source_account_id
+                  AND src.account_type='staff_cash'
+              )
+              ORDER BY t.created_at DESC LIMIT 200`, actor.ID)
 		if err != nil {
 			problem(w, 500, "Could not load cash handovers")
 			return
@@ -176,7 +182,12 @@ func (s *Server) cashHandovers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) pendingCashHandovers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.QueryContext(r.Context(), cashHandoverSelect+`
-		ORDER BY CASE WHEN t.status='pending' THEN 0 ELSE 1 END,t.created_at DESC LIMIT 300`)
+		WHERE EXISTS (
+                SELECT 1 FROM financial_accounts src
+                WHERE src.id=t.source_account_id
+                  AND src.account_type='staff_cash'
+              )
+              ORDER BY CASE WHEN t.status='pending' THEN 0 ELSE 1 END,t.created_at DESC LIMIT 300`)
 	if err != nil {
 		problem(w, 500, "Could not load cash handover requests")
 		return

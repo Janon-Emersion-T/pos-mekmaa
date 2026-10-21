@@ -44,9 +44,104 @@ function dailyReportView() {
   return filterForm("report-filter", filterInput("From", "from", "date") + filterInput("To", "to", "date")) + `<p class="mb-4 text-xs text-gray-500">${escapeHTML(reportData.from)}${reportData.to !== reportData.from ? ` to ${escapeHTML(reportData.to)}` : ""} · ${escapeHTML(reportData.timezone)}</p><a href="/api/reports/daily?${escapeHTML(csv.toString())}" class="text-sm text-orange-600">Download CSV</a>` +
     table(["Currency", "Sales", "Cash sales", "Card sales", "Credit sales", "Cash collected on credit", "Card collected on credit", "Money refunded", "Debt cancelled", "Net sales", "Petty cash in", "Petty cash out", "Closing difference"], reportData.rows.map(r => `<tr class="border-b">${[escapeHTML(r.currency), r.saleCount, money(r.cashSales,r.currency), money(r.cardSales,r.currency), money(r.creditSales || 0,r.currency), money(r.cashCollections || 0,r.currency), money(r.cardCollections || 0,r.currency), money(r.cashRefunds+r.cardRefunds,r.currency), money(r.creditReturns || 0,r.currency), money(r.cashSales+r.cardSales+(r.creditSales || 0)-r.cashRefunds-r.cardRefunds-(r.creditReturns || 0),r.currency), money(r.pettyIn,r.currency), money(r.pettyOut,r.currency), money(r.closingDifference,r.currency)].map(v=>`<td class="p-4">${v}</td>`).join("")}</tr>`).join(""));
 }
+
+function superadminCashTransferForm() {
+  const accounts = accountBalances.filter(a =>
+    a.accountType === "superadmin_cash" &&
+    a.ownerRole === "superadmin" && a.ownerEmail
+  );
+  const options = accounts.map(a =>
+    `<option value="${a.id}">${escapeHTML(a.ownerEmail)} — ${money(a.balance,a.currency)}</option>`
+  ).join("");
+  if (accounts.length < 2) return "";
+  return `<form data-form="superadmin-transfer" class="mb-5 grid gap-4 rounded-xl border bg-white p-5">
+    <h3 class="font-semibold">Transfer between Superadmin cash accounts</h3>
+    <label>From<select name="sourceAccountId" required class="mt-2 w-full rounded-lg border p-3">${options}</select></label>
+    <label>To<select name="destinationAccountId" required class="mt-2 w-full rounded-lg border p-3">${options}</select></label>
+    <label>Amount (LKR)<input name="amount" type="number" min="0.01" step="0.01" required class="mt-2 w-full rounded-lg border p-3"></label>
+    <label>Remarks<input name="remarks" maxlength="500" class="mt-2 w-full rounded-lg border p-3"></label>
+    <button class="rounded-lg bg-ink px-5 py-3 text-white">Transfer funds</button>
+  </form>`;
+}
+const superadminTransferPendingKey = () =>
+  `counter.pending-superadmin-transfer.${currentUser.id}`;
+
+document.addEventListener("submit", async event => {
+  const form = event.target;
+  if (form.dataset.form !== "superadmin-transfer") return;
+  event.preventDefault();
+  if (form.dataset.saving) return;
+
+  const button = form.querySelector("button");
+  form.dataset.saving = "true";
+  button.disabled = true;
+
+  try {
+    const key = superadminTransferPendingKey();
+    let request;
+    const saved = localStorage.getItem(key);
+
+    if (saved) {
+      request = JSON.parse(saved);
+      if (!request?.requestId ||
+          !Number.isSafeInteger(request.amount) ||
+          !Number.isSafeInteger(request.sourceAccountId) ||
+          !Number.isSafeInteger(request.destinationAccountId)) {
+        throw Error("Saved transfer is invalid. Verify its status before proceeding.");
+      }
+
+      if (!confirm(
+        "An earlier transfer has an unresolved result. Retry the exact same request to recover its result?"
+      )) return;
+    } else {
+      const values = Object.fromEntries(new FormData(form));
+      const sourceAccountId = Number(values.sourceAccountId);
+      const destinationAccountId = Number(values.destinationAccountId);
+      const source = accountBalances.find(a => a.id === sourceAccountId);
+      const destination = accountBalances.find(a => a.id === destinationAccountId);
+      const amount = minorUnits(values.amount);
+
+      if (!source || !destination ||
+          source.id === destination.id ||
+          source.ownerEmail === destination.ownerEmail ||
+          source.currency !== destination.currency ||
+          amount <= 0 || amount > source.balance) {
+        throw Error("Choose different Superadmin accounts with sufficient funds in the same currency");
+      }
+
+      if (!confirm(
+        `Transfer ${money(amount,source.currency)} from ${source.ownerEmail} to ${destination.ownerEmail}?`
+      )) return;
+
+      request = {
+        requestId: crypto.randomUUID(),
+        sourceAccountId,
+        destinationAccountId,
+        amount,
+        remarks: values.remarks || ""
+      };
+
+      // Persist the exact payload before submitting it.
+      // A retry must use the original request ID.
+      localStorage.setItem(key, JSON.stringify(request));
+    }
+
+    await api("/api/financial/superadmin-transfer", jsonRequest(request));
+    localStorage.removeItem(key);
+    await loadPage();
+    toast("Transfer completed or previous transfer confirmed");
+  } catch (error) {
+    // Retain the pending request if the result is uncertain.
+    toast(error.message);
+  } finally {
+    delete form.dataset.saving;
+    button.disabled = false;
+  }
+});
+
 function accountBalancesView() {
   const labels = {staff_cash:"Staff cash",superadmin_cash:"Superadmin cash",central_cash:"Central cash",investment_cash:"Investment cash",bank:"Bank"};
-  return table(["Account", "Owner", "Role", "Currency", "Balance", "Last updated"], accountBalances.map(a => `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(labels[a.accountType] || a.accountType)}</td><td class="p-4">${escapeHTML(a.ownerEmail || "Business")}</td><td class="p-4 capitalize">${escapeHTML(a.ownerRole || "—")}</td><td class="p-4">${escapeHTML(a.currency)}</td><td class="p-4 font-semibold">${money(a.balance,a.currency)}</td><td class="p-4">${new Date(a.updatedAt).toLocaleString()}</td></tr>`).join(""));
+  return superadminCashTransferForm() + table(["Account", "Owner", "Role", "Currency", "Balance", "Last updated"], accountBalances.map(a => `<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(labels[a.accountType] || a.accountType)}</td><td class="p-4">${escapeHTML(a.ownerEmail || "Business")}</td><td class="p-4 capitalize">${escapeHTML(a.ownerRole || "—")}</td><td class="p-4">${escapeHTML(a.currency)}</td><td class="p-4 font-semibold">${money(a.balance,a.currency)}</td><td class="p-4">${new Date(a.updatedAt).toLocaleString()}</td></tr>`).join(""));
 }
 function auditView() {
   return filterForm("audit-filter", filterInput("Entity", "entity") + filterInput("Staff email", "actor")) +
