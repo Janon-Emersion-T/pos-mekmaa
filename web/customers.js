@@ -65,7 +65,22 @@ function customersView() {
     </section>`;
   }
   body += filterForm('customer-filter',filterInput('Search name, phone, or email','q'));
-  body += table(['Customer','Phone','Email','Outstanding','Actions'],filtered.map(c=>`<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(c.name)} <span class="text-xs text-gray-400">#${c.id}</span></td><td class="p-4">${escapeHTML(c.phone)}</td><td class="p-4">${escapeHTML(c.email)}</td><td class="p-4">${balances(c)}</td><td class="p-4"><a href="/customers?id=${c.id}&collect=1" data-page="customers" class="mr-3 font-semibold text-orange-600">Collect payment</a><a href="/customers?id=${c.id}" data-page="customers" class="mr-3 text-orange-600">Account</a><button data-edit-customer="${c.id}" class="text-orange-600">Edit</button></td></tr>`).join(''));
+  const outstandingTotals = new Map();
+  for (const customer of customers) {
+    for (const balance of customer.balances || []) {
+      const currency = balance.currency || 'LKR';
+      outstandingTotals.set(
+        currency,
+        (outstandingTotals.get(currency) || 0) + Number(balance.outstanding || 0)
+      );
+    }
+  }
+  const outstandingHeading = 'Outstanding (' +
+    ([...outstandingTotals.entries()]
+      .map(([currency, amount]) => money(amount, currency))
+      .join(' · ') || money(0, 'LKR')) + ')';
+
+  body += table(['Customer','Phone','Email',outstandingHeading,'Actions'],filtered.map(c=>`<tr class="border-b"><td class="p-4 font-medium">${escapeHTML(c.name)} <span class="text-xs text-gray-400">#${c.id}</span></td><td class="p-4">${escapeHTML(c.phone)}</td><td class="p-4">${escapeHTML(c.email)}</td><td class="p-4">${balances(c)}</td><td class="p-4"><a href="/customers?id=${c.id}&collect=1" data-page="customers" class="mr-3 font-semibold text-orange-600">Collect payment</a><a href="/customers?id=${c.id}" data-page="customers" class="mr-3 text-orange-600">Account</a><button data-edit-customer="${c.id}" class="text-orange-600">Edit</button></td></tr>`).join(''));
   try { pendingCollection = JSON.parse(localStorage.getItem(collectionKey()) || 'null'); } catch { /* Keep any in-memory pending request. */ }
   if (pendingCollection) body += `<div class="my-5 rounded-lg border bg-orange-50 p-4 text-sm">A customer payment is awaiting confirmation. Recover it before recording another payment.<button data-recover-collection class="ml-3 text-orange-600">Recover payment</button></div>`;
   if (!customerAccount) return body;
