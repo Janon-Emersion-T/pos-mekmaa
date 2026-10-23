@@ -200,7 +200,9 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	if err = json.Unmarshal(request("GET", "/api/reports/profit", "", 200).Body.Bytes(), &profit); err != nil {
 		t.Fatal(err)
 	}
-	if len(profit.Rows) != 1 || profit.Rows[0].GrossProfit == nil || *profit.Rows[0].GrossProfit != 5000 || profit.Rows[0].TotalProfit == nil || *profit.Rows[0].TotalProfit != 5000 {
+	// Opening stock does not have a verified acquisition-cost ledger entry.
+	// The report must not invent profit using the editable product cost.
+	if len(profit.Rows) != 1 || profit.Rows[0].GrossProfit != nil || profit.Rows[0].TotalProfit != nil || profit.Rows[0].UnverifiedSales != 1 {
 		t.Fatalf("profit report: %+v", profit.Rows)
 	}
 	request("DELETE", salePath, `{"confirmation":"DELETE","reason":"Duplicate entry"}`, 400)
