@@ -1,5 +1,5 @@
 // Companion functions for the catalog, register, and management screens.
-let reportData = { rows: [] }, auditData = [], accountBalances = [];
+let reportData = { rows: [] }, profitReportData = { rows: [] }, auditData = [], accountBalances = [];
 const jsonRequest = (body) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 const pendingKey = () => `counter.pending-checkout.${currentUser.id}`;
 const refundKey = () => `counter.pending-refund.${currentUser.id}`;
@@ -43,6 +43,21 @@ function dailyReportView() {
   const csv = new URLSearchParams(location.search); csv.set("format", "csv");
   return filterForm("report-filter", filterInput("From", "from", "date") + filterInput("To", "to", "date")) + `<p class="mb-4 text-xs text-gray-500">${escapeHTML(reportData.from)}${reportData.to !== reportData.from ? ` to ${escapeHTML(reportData.to)}` : ""} · ${escapeHTML(reportData.timezone)}</p><a href="/api/reports/daily?${escapeHTML(csv.toString())}" class="text-sm text-orange-600">Download CSV</a>` +
     table(["Currency", "Sales", "Cash sales", "Card sales", "Credit sales", "Cash collected on credit", "Card collected on credit", "Money refunded", "Debt cancelled", "Net sales", "Petty cash in", "Petty cash out", "Closing difference"], reportData.rows.map(r => `<tr class="border-b">${[escapeHTML(r.currency), r.saleCount, money(r.cashSales,r.currency), money(r.cardSales,r.currency), money(r.creditSales || 0,r.currency), money(r.cashCollections || 0,r.currency), money(r.cardCollections || 0,r.currency), money(r.cashRefunds+r.cardRefunds,r.currency), money(r.creditReturns || 0,r.currency), money(r.cashSales+r.cardSales+(r.creditSales || 0)-r.cashRefunds-r.cardRefunds-(r.creditReturns || 0),r.currency), money(r.pettyIn,r.currency), money(r.pettyOut,r.currency), money(r.closingDifference,r.currency)].map(v=>`<td class="p-4">${v}</td>`).join("")}</tr>`).join(""));
+}
+
+function profitReportView() {
+  const value = (amount, currency) => amount == null ? '<span class="text-gray-400">Unavailable</span>' : money(amount, currency);
+  const cards = profitReportData.rows.map(r => `<section class="rounded-xl border bg-white p-5">
+    <div class="flex items-center justify-between"><h2 class="font-semibold">${escapeHTML(r.currency)}</h2><span class="text-xs text-gray-400">${escapeHTML(profitReportData.from)} to ${escapeHTML(profitReportData.to)}</span></div>
+    <p class="mt-5 text-xs text-gray-500">Total profit</p><p class="mt-1 text-3xl font-semibold">${value(r.totalProfit,r.currency)}</p>
+    <div class="mt-5 grid gap-3 sm:grid-cols-3">
+      ${[["Net revenue",r.netRevenue],["Net cost of goods",r.netCostOfGoods],["Gross profit",r.grossProfit],["Petty cash in",r.pettyCashIn],["Petty cash out",r.pettyCashOut]].map(x=>`<div class="rounded-lg bg-gray-50 p-4"><p class="text-xs text-gray-500">${x[0]}</p><p class="mt-1 font-semibold">${value(x[1],r.currency)}</p></div>`).join("")}
+    </div>
+    ${r.unverifiedSales || r.unverifiedRefunds ? `<p class="mt-4 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">Profit is unavailable because ${r.unverifiedSales} sale(s) and ${r.unverifiedRefunds} refund(s) do not have verified historical cost records.</p>` : ""}
+  </section>`).join("");
+  return filterForm("profit-report-filter", filterInput("From", "from", "date") + filterInput("To", "to", "date")) +
+    `<p class="mb-4 text-xs text-gray-500">Inclusive dates · ${escapeHTML(profitReportData.timezone || "")}</p>` +
+    (cards ? `<div class="grid gap-4">${cards}</div>` : '<div class="rounded-xl border bg-white p-8 text-center text-sm text-gray-500">No sales, returns, or petty cash entries in this date range.</div>');
 }
 
 function superadminCashTransferForm() {
@@ -222,7 +237,7 @@ $("#checkout").onclick = async () => {
 };
 $("#other-page").addEventListener("submit", async e => {
   const form = e.target, kind = form.dataset.form;
-  if (!["sale-filter","report-filter","audit-filter","password"].includes(kind)) return;
+  if (!["sale-filter","report-filter","profit-report-filter","audit-filter","password"].includes(kind)) return;
   e.preventDefault();
   if (form.dataset.saving) return;
   const data = Object.fromEntries(new FormData(form));

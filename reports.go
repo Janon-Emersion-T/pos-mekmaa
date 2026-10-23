@@ -9,6 +9,100 @@ import (
 	"time"
 )
 
+type ProfitRow struct {
+	Currency          string `json:"currency"`
+	SalesRevenue      int64  `json:"salesRevenue"`
+	Refunds           int64  `json:"refunds"`
+	NetRevenue        int64  `json:"netRevenue"`
+	CostOfGoodsSold   int64  `json:"costOfGoodsSold"`
+	ReturnedGoodsCost int64  `json:"returnedGoodsCost"`
+	NetCostOfGoods    int64  `json:"netCostOfGoods"`
+	GrossProfit       *int64 `json:"grossProfit"`
+	PettyCashIn       int64  `json:"pettyCashIn"`
+	PettyCashOut      int64  `json:"pettyCashOut"`
+	TotalProfit       *int64 `json:"totalProfit"`
+	UnverifiedSales   int    `json:"unverifiedSales"`
+	UnverifiedRefunds int    `json:"unverifiedRefunds"`
+}
+
+// profitReport recognizes revenue and cost on the dates the sale or return
+// occurred. Costs come only from immutable historical snapshots; it never
+// substitutes today's product cost for older, unverified transactions.
+func (s *Server) profitReport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	fromDay, toDay := q.Get("from"), q.Get("to")
+	if fromDay == "" && toDay == "" {
+		fromDay = time.Now().In(businessLocation()).Format("2006-01-02")
+		toDay = fromDay
+	} else if fromDay == "" {
+		fromDay = toDay
+	} else if toDay == "" {
+		toDay = fromDay
+	}
+	from, to, err := dateBounds(fromDay, toDay)
+	if err != nil {
+		problem(w, 400, "Invalid report date")
+		return
+	}
+
+	rows, err := s.db.QueryContext(r.Context(), `WITH refund_costs AS (
+    SELECT r.id,r.currency,r.total,
+           CASE WHEN COUNT(*)=COUNT(ri.historical_cost_allocated)
+                THEN SUM(ri.historical_cost_allocated) END AS returned_cost
+    FROM refunds r JOIN refund_items ri ON ri.refund_id=r.id
+    WHERE r.created_at >= $1 AND r.created_at < $2
+    GROUP BY r.id,r.currency,r.total
+), events AS (
+    SELECT s.currency,s.total::bigint AS revenue,0::bigint AS refunds,
+           COALESCE(v.total_cogs,0)::bigint AS cogs,0::bigint AS returned_cogs,
+           (v.total_cogs IS NULL)::int AS unverified_sale,0::int AS unverified_refund,
+           0::bigint AS petty_in,0::bigint AS petty_out
+    FROM sales s LEFT JOIN verified_sale_costs v ON v.sale_id=s.id
+    WHERE s.created_at >= $1 AND s.created_at < $2 AND s.deleted_at IS NULL
+    UNION ALL
+    SELECT currency,0,total,0,COALESCE(returned_cost,0),0,
+           (returned_cost IS NULL)::int,0,0 FROM refund_costs
+    UNION ALL
+    SELECT currency,0,0,0,0,0,0,
+           CASE WHEN direction='in' THEN amount ELSE 0 END,
+           CASE WHEN direction='out' THEN amount ELSE 0 END
+    FROM petty_cash_entries WHERE created_at >= $1 AND created_at < $2
+)
+SELECT currency,COALESCE(SUM(revenue),0),COALESCE(SUM(refunds),0),
+       COALESCE(SUM(cogs),0),COALESCE(SUM(returned_cogs),0),
+       COALESCE(SUM(petty_in),0),COALESCE(SUM(petty_out),0),
+       COALESCE(SUM(unverified_sale),0),COALESCE(SUM(unverified_refund),0)
+FROM events GROUP BY currency ORDER BY currency`, from, to)
+	if err != nil {
+		problem(w, 500, "Could not load profit report")
+		return
+	}
+	defer rows.Close()
+	out := []ProfitRow{}
+	for rows.Next() {
+		var x ProfitRow
+		if err = rows.Scan(&x.Currency, &x.SalesRevenue, &x.Refunds,
+			&x.CostOfGoodsSold, &x.ReturnedGoodsCost, &x.PettyCashIn,
+			&x.PettyCashOut, &x.UnverifiedSales, &x.UnverifiedRefunds); err != nil {
+			problem(w, 500, "Could not read profit report")
+			return
+		}
+		x.NetRevenue = x.SalesRevenue - x.Refunds
+		x.NetCostOfGoods = x.CostOfGoodsSold - x.ReturnedGoodsCost
+		if x.UnverifiedSales == 0 && x.UnverifiedRefunds == 0 {
+			gross := x.NetRevenue - x.NetCostOfGoods
+			total := gross + x.PettyCashIn - x.PettyCashOut
+			x.GrossProfit, x.TotalProfit = &gross, &total
+		}
+		out = append(out, x)
+	}
+	if rows.Err() != nil {
+		problem(w, 500, "Could not read profit report")
+		return
+	}
+	respond(w, 200, map[string]any{"from": fromDay, "to": toDay, "timezone": businessLocation().String(), "rows": out})
+}
+
 type DailyRow struct {
 	CreditSales       int    `json:"creditSales"`
 	CashCollections   int    `json:"cashCollections"`
@@ -132,6 +226,7 @@ func (s *Server) operationRoutes(m *http.ServeMux) {
 	m.Handle("GET /api/sales/{id}/refunds", requireRoles(s.refunds, "superadmin", "admin", "cashier"))
 	m.Handle("POST /api/sales/{id}/refunds", requireRoles(s.refundSale, "superadmin", "admin"))
 	m.Handle("GET /api/reports/daily", requireRoles(s.dailyReport, "superadmin", "admin"))
+	m.Handle("GET /api/reports/profit", requireRoles(s.profitReport, "superadmin"))
 	m.Handle("GET /api/audit", requireRoles(s.auditHistory, "superadmin"))
 	m.Handle("POST /api/auth/password", requireRoles(s.changePassword, "superadmin", "admin", "cashier"))
 	m.Handle("GET /api/products/export", requireRoles(s.exportProducts, "superadmin", "admin"))

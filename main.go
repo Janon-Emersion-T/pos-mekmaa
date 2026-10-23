@@ -1659,7 +1659,7 @@ func (s *Server) routes() http.Handler {
 	private.Handle("PATCH /api/users/", requireRoles(s.updateUser, "superadmin"))
 	private.Handle("POST /api/users/{id}/temporary-password", requireRoles(s.generateUserTemporaryPassword, "superadmin"))
 	sub, _ := fs.Sub(assets, "web")
-	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/invoices", "/petty", "/users", "/balances", "/settings", "/reports", "/audit", "/account", "/customers", "/help", "/guest-refreshments"} {
+	for _, path := range []string{"/pos", "/products", "/session", "/sales", "/inventory", "/purchases", "/invoices", "/petty", "/users", "/balances", "/settings", "/reports", "/profit-report", "/audit", "/account", "/customers", "/help", "/guest-refreshments"} {
 		private.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, sub, "index.html")
 		})

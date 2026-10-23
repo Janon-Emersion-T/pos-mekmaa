@@ -73,6 +73,7 @@ async function setup(t, options = {}) {
         }
       ],
       '/api/reports/daily':{date:'2026-09-25',from:'2026-09-25',to:'2026-09-25',timezone:'Asia/Colombo',rows:[]},
+      '/api/reports/profit':{from:'2026-09-01',to:'2026-09-25',timezone:'Asia/Colombo',rows:[{currency:'LKR',salesRevenue:20000,refunds:2000,netRevenue:18000,costOfGoodsSold:9000,returnedGoodsCost:1000,netCostOfGoods:8000,grossProfit:10000,pettyCashIn:500,pettyCashOut:1500,totalProfit:9000,unverifiedSales:0,unverifiedRefunds:0}]},
       '/api/financial/balances':[
         {id:10,userId:null,ownerEmail:'',ownerRole:'',accountType:'central_cash',currency:'LKR',balance:500000,updatedAt:'2026-09-25T10:00:00Z'},
         {id:11,userId:1,ownerEmail:'test@example.test',ownerRole:'superadmin',accountType:'superadmin_cash',currency:'LKR',balance:250000,updatedAt:'2026-09-25T10:00:00Z'}
@@ -93,7 +94,7 @@ async function ready(page, route = '/pos') {
 test('menu starts and every management page renders without missing functions', async t => {
   const {page,errors} = await setup(t);
   await ready(page);
-  for (const route of ['customers','products','sales','reports','balances','audit','account','session','inventory','purchases','invoices','petty','users','settings']) {
+  for (const route of ['customers','products','sales','reports','profit-report','balances','audit','account','session','inventory','purchases','invoices','petty','users','settings']) {
     await page.evaluate(route => navigate(route), route);
     assert.ok(await page.locator('#other-page h1').count(), `${route} did not render`);
     assert.doesNotMatch(await page.locator('#other-page').innerText(), /Could not load/);

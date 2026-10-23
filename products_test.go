@@ -187,11 +187,22 @@ func TestProductLifecycleAndRoutes(t *testing.T) {
 	salePath := fmt.Sprintf("/api/sales/%d", saleID)
 	deleteBody := fmt.Sprintf(`{"confirmation":"DELETE %d","reason":"Duplicate entry"}`, saleID)
 	request("DELETE", salePath, deleteBody, 403)
+	request("GET", "/api/reports/profit", "", 403)
 	if _, err = db.Exec(`UPDATE users SET role='superadmin' WHERE id=$1`, userID); err != nil {
 		t.Fatal(err)
 	}
 	request("GET", "/api/audit", "", 200)
 	request("GET", "/api/reports/daily", "", 200)
+	request("GET", "/api/reports/profit?from=bad-date", "", 400)
+	var profit struct {
+		Rows []ProfitRow `json:"rows"`
+	}
+	if err = json.Unmarshal(request("GET", "/api/reports/profit", "", 200).Body.Bytes(), &profit); err != nil {
+		t.Fatal(err)
+	}
+	if len(profit.Rows) != 1 || profit.Rows[0].GrossProfit == nil || *profit.Rows[0].GrossProfit != 5000 || profit.Rows[0].TotalProfit == nil || *profit.Rows[0].TotalProfit != 5000 {
+		t.Fatalf("profit report: %+v", profit.Rows)
+	}
 	request("DELETE", salePath, `{"confirmation":"DELETE","reason":"Duplicate entry"}`, 400)
 	request("DELETE", salePath, fmt.Sprintf(`{"confirmation":"DELETE %d","reason":"   "}`, saleID), 400)
 	var before Session
